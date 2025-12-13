@@ -14,7 +14,9 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
-#include <opencv/cv.h>
+//#include <opencv/cv.h>
+#include <opencv2/opencv.hpp>  // 包含所有核心功能
+#include <opencv2/imgproc/imgproc_c.h>  // 补充cv.h中的部分旧函数
 
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>

@@ -1,0 +1,57 @@
+{
+    "todo-tree.general.tags": [
+    "TODO",    // 默认标签
+    "FIXME",   // 默认标签
+    "BUG",     // 默认标签
+    "NOTE",    // 默认标签
+    "SLIDING-WINDOW",    // 新增：标记临时方案
+    "TODO-URGENT",  // 新增：紧急待办
+    "FORMULA",
+    "C++",
+    "WAIT",
+  ],
+  "todo-tree.regex.regexCaseSensitive": false,
+  "todo-tree.highlights.defaultHighlight": {  //如果相应变量没赋值就会使用这里的默认值
+        "foreground": "black",      //字体颜色
+        "icon": "check",            //标签样式 check 是一个对号的样式
+        "rulerColour": "yellow",    //边框颜色
+        "type": "text",              //填充色类型  可在TODO TREE 细节页面找到允许的值
+        "opacity": 0.7,             //设置透明度
+        "iconColour": "yellow",     //标签颜色
+        "gutterIcon": true           //是否显示图标
+    },
+
+  "todo-tree.highlights.customHighlight": {
+    "SLIDING-WINDOW": { 
+      "foreground": "#2fff00",  // 黄色（支持 Hex、RGB 或颜色名）
+      "fontWeight": "bold"    // 正常字体
+    },
+    "TODO-URGENT": { 
+      "foreground": "#ff0000",  // 红色
+      "fontWeight": "bold"      // 加粗
+    },
+    // 也可以修改默认标签的样式
+    "FIXME": { 
+      "foreground": "#f44336",  // 深红色
+      "fontWeight": "bold"
+    },
+    "NOTE": { 
+      "foreground": "#2d7aff",  // 
+      "fontWeight": "bold"
+    },
+    "FORMULA": { 
+      "foreground": "#ff0000",  // 
+      "fontWeight": "bold",
+      "rulerColour": "#ff0000",
+      "iconColour":"#ff0000"
+    },
+    "C++": { 
+      "foreground": "#8b2dff",  // 
+      "fontWeight": "bold"
+    },
+    "WAIT": { 
+      "foreground": "#ff8b2d",  // 
+      "fontWeight": "bold"
+    },
+},
+}

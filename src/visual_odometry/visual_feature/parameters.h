@@ -13,7 +13,9 @@
 #include <sensor_msgs/image_encodings.h>
 #include <nav_msgs/Odometry.h>
 
-#include <opencv/cv.h>
+//#include <opencv/cv.h>
+#include <opencv2/opencv.hpp>  // 包含所有核心功能
+#include <opencv2/imgproc/imgproc_c.h>  // 补充cv.h中的部分旧函数
 #include <cv_bridge/cv_bridge.h>
 
 #include <pcl/point_cloud.h>
