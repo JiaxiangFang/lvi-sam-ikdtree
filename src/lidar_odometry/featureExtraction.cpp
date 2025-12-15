@@ -1,5 +1,5 @@
 #include "utility.h"
-#include "lvi_sam/cloud_info.h"
+#include "lvi_sam_ikdtree/cloud_info.h"
 
 struct smoothness_t{ 
     float value;
@@ -29,7 +29,7 @@ public:
 
     pcl::VoxelGrid<PointType> downSizeFilter;
 
-    lvi_sam::cloud_info cloudInfo;
+    lvi_sam_ikdtree::cloud_info cloudInfo;
     std_msgs::Header cloudHeader;
 
     std::vector<smoothness_t> cloudSmoothness;
@@ -39,9 +39,9 @@ public:
 
     FeatureExtraction()
     {
-        subLaserCloudInfo = nh.subscribe<lvi_sam::cloud_info>(PROJECT_NAME + "/lidar/deskew/cloud_info", 5, &FeatureExtraction::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
+        subLaserCloudInfo = nh.subscribe<lvi_sam_ikdtree::cloud_info>(PROJECT_NAME + "/lidar/deskew/cloud_info", 5, &FeatureExtraction::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
 
-        pubLaserCloudInfo = nh.advertise<lvi_sam::cloud_info> (PROJECT_NAME + "/lidar/feature/cloud_info", 5);
+        pubLaserCloudInfo = nh.advertise<lvi_sam_ikdtree::cloud_info> (PROJECT_NAME + "/lidar/feature/cloud_info", 5);
         pubCornerPoints = nh.advertise<sensor_msgs::PointCloud2>(PROJECT_NAME + "/lidar/feature/cloud_corner", 5);
         pubSurfacePoints = nh.advertise<sensor_msgs::PointCloud2>(PROJECT_NAME + "/lidar/feature/cloud_surface", 5);
         
@@ -63,7 +63,7 @@ public:
         cloudLabel = new int[N_SCAN*Horizon_SCAN];
     }
 
-    void laserCloudInfoHandler(const lvi_sam::cloud_infoConstPtr& msgIn)
+    void laserCloudInfoHandler(const lvi_sam_ikdtree::cloud_infoConstPtr& msgIn)
     {
         cloudInfo = *msgIn; // new cloud info
         cloudHeader = msgIn->header; // new cloud header

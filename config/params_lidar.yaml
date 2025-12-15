@@ -1,7 +1,7 @@
 # project name
-PROJECT_NAME: "lvi_sam"
+PROJECT_NAME: "lvi_sam_ikdtree"
 
-lvi_sam:
+lvi_sam_ikdtree:
 
   # Topics
   pointCloudTopic: "/points_raw"               # Point cloud data

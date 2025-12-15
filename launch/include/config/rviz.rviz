@@ -79,7 +79,7 @@ Visualization Manager:
           Size (Pixels): 10
           Size (m): 1
           Style: Points
-          Topic: /lvi_sam/vins/depth/depth_feature
+          Topic: /lvi_sam_ikdtree/vins/depth/depth_feature
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: false
@@ -109,14 +109,14 @@ Visualization Manager:
           Size (Pixels): 3
           Size (m): 0.10000000149011612
           Style: Points
-          Topic: /lvi_sam/vins/depth/depth_cloud
+          Topic: /lvi_sam_ikdtree/vins/depth/depth_cloud
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
           Value: false
         - Class: rviz/Image
           Enabled: true
-          Image Topic: /lvi_sam/vins/feature/feature_img
+          Image Topic: /lvi_sam_ikdtree/vins/feature/feature_img
           Max Value: 1
           Median window: 5
           Min Value: 0
@@ -128,7 +128,7 @@ Visualization Manager:
           Value: true
         - Class: rviz/Image
           Enabled: false
-          Image Topic: /lvi_sam/vins/depth/depth_image
+          Image Topic: /lvi_sam_ikdtree/vins/depth/depth_image
           Max Value: 1
           Median window: 5
           Min Value: 0
@@ -167,7 +167,7 @@ Visualization Manager:
           Size (Pixels): 15
           Size (m): 0.30000001192092896
           Style: Points
-          Topic: /lvi_sam/vins/odometry/point_cloud
+          Topic: /lvi_sam_ikdtree/vins/odometry/point_cloud
           Unreliable: false
           Use Fixed Frame: false
           Use rainbow: false
@@ -197,7 +197,7 @@ Visualization Manager:
           Size (Pixels): 5
           Size (m): 0.009999999776482582
           Style: Points
-          Topic: /lvi_sam/vins/odometry/history_cloud
+          Topic: /lvi_sam_ikdtree/vins/odometry/history_cloud
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: false
@@ -226,7 +226,7 @@ Visualization Manager:
           Radius: 0.029999999329447746
           Shaft Diameter: 0.10000000149011612
           Shaft Length: 0.10000000149011612
-          Topic: /lvi_sam/lidar/mapping/path
+          Topic: /lvi_sam_ikdtree/lidar/mapping/path
           Unreliable: false
           Value: true
         - Alpha: 1
@@ -249,7 +249,7 @@ Visualization Manager:
           Radius: 0.029999999329447746
           Shaft Diameter: 0.10000000149011612
           Shaft Length: 0.10000000149011612
-          Topic: /lvi_sam/lidar/imu/path
+          Topic: /lvi_sam_ikdtree/lidar/imu/path
           Unreliable: false
           Value: true
         - Alpha: 1
@@ -277,7 +277,7 @@ Visualization Manager:
           Size (Pixels): 2
           Size (m): 0.30000001192092896
           Style: Points
-          Topic: /lvi_sam/lidar/deskew/cloud_deskewed
+          Topic: /lvi_sam_ikdtree/lidar/deskew/cloud_deskewed
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
@@ -307,7 +307,7 @@ Visualization Manager:
           Size (Pixels): 2
           Size (m): 0.009999999776482582
           Style: Points
-          Topic: /lvi_sam/lidar/mapping/cloud_registered
+          Topic: /lvi_sam_ikdtree/lidar/mapping/cloud_registered
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
@@ -337,7 +337,7 @@ Visualization Manager:
           Size (Pixels): 3
           Size (m): 0.009999999776482582
           Style: Points
-          Topic: /lvi_sam/lidar/mapping/map_global
+          Topic: /lvi_sam_ikdtree/lidar/mapping/map_global
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
@@ -367,7 +367,7 @@ Visualization Manager:
           Size (Pixels): 2
           Size (m): 0.009999999776482582
           Style: Points
-          Topic: /lvi_sam/lidar/mapping/map_local
+          Topic: /lvi_sam_ikdtree/lidar/mapping/map_local
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
@@ -378,7 +378,7 @@ Visualization Manager:
       Displays:
         - Class: rviz/Image
           Enabled: false
-          Image Topic: /lvi_sam/vins/loop/match_image
+          Image Topic: /lvi_sam_ikdtree/vins/loop/match_image
           Max Value: 1
           Median window: 5
           Min Value: 0
@@ -390,7 +390,7 @@ Visualization Manager:
           Value: false
         - Class: rviz/MarkerArray
           Enabled: true
-          Marker Topic: /lvi_sam/lidar/mapping/loop_closure_constraints
+          Marker Topic: /lvi_sam_ikdtree/lidar/mapping/loop_closure_constraints
           Name: Loop matches
           Namespaces:
             {}
@@ -421,7 +421,7 @@ Visualization Manager:
           Size (Pixels): 3
           Size (m): 0.30000001192092896
           Style: Points
-          Topic: /lvi_sam/lidar/mapping/loop_closure_history_cloud
+          Topic: /lvi_sam_ikdtree/lidar/mapping/loop_closure_history_cloud
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
@@ -451,7 +451,7 @@ Visualization Manager:
           Size (Pixels): 5
           Size (m): 0.30000001192092896
           Style: Points
-          Topic: /lvi_sam/lidar/mapping/loop_closure_corrected_cloud
+          Topic: /lvi_sam_ikdtree/lidar/mapping/loop_closure_corrected_cloud
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true

@@ -1,12 +1,12 @@
 %YAML:1.0
 
 # Project
-project_name: "lvi_sam"
+project_name: "lvi_sam_ikdtree"
 
 #common parameters
 imu_topic: "/imu_raw"
 image_topic: "/camera/image_raw"
-point_cloud_topic: "lvi_sam/lidar/deskew/cloud_deskewed"
+point_cloud_topic: "lvi_sam_ikdtree/lidar/deskew/cloud_deskewed"
 
 # Lidar Params
 use_lidar: 1                     # whether use depth info from lidar or not

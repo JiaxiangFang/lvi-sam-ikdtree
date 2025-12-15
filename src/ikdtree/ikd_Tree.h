@@ -59,7 +59,7 @@ class MANUAL_Q{
 template<typename PointType>
 class KD_TREE{
 public:
-    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    // EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     
     using PointVector = vector<PointType, Eigen::aligned_allocator<PointType>>;
     using Ptr = shared_ptr<KD_TREE<PointType>>;
@@ -86,7 +86,7 @@ public:
         float alpha_del;
         float alpha_bal;
 
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+        // EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     };
 
     struct Operation_Logger_Type{
@@ -95,7 +95,7 @@ public:
         bool tree_deleted, tree_downsample_deleted;
         operation_set op;
 
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+        // EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     };
 
     struct PointType_CMP{

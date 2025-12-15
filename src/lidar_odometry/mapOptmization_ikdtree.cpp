@@ -1,5 +1,5 @@
 #include "utility.h"
-#include "lvi_sam/cloud_info.h"
+#include "lvi_sam_ikdtree/cloud_info.h"
 
 #include "ikd_Tree.h"
 
@@ -78,7 +78,7 @@ public:
     ros::Subscriber subLoopInfo;
 
     std::deque<nav_msgs::Odometry> gpsQueue;
-    lvi_sam::cloud_info cloudInfo;
+    lvi_sam_ikdtree::cloud_info cloudInfo;
 
     vector<pcl::PointCloud<PointType>::Ptr> cornerCloudKeyFrames;
     vector<pcl::PointCloud<PointType>::Ptr> surfCloudKeyFrames;
@@ -164,7 +164,7 @@ public:
         pubOdomAftMappedROS   = nh.advertise<nav_msgs::Odometry>      (PROJECT_NAME + "/lidar/mapping/odometry", 1);
         pubPath               = nh.advertise<nav_msgs::Path>          (PROJECT_NAME + "/lidar/mapping/path", 1);
 
-        subLaserCloudInfo     = nh.subscribe<lvi_sam::cloud_info>     (PROJECT_NAME + "/lidar/feature/cloud_info", 5, &mapOptimization::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
+        subLaserCloudInfo     = nh.subscribe<lvi_sam_ikdtree::cloud_info>     (PROJECT_NAME + "/lidar/feature/cloud_info", 5, &mapOptimization::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
         subGPS                = nh.subscribe<nav_msgs::Odometry>      (gpsTopic,                                   50, &mapOptimization::gpsHandler, this, ros::TransportHints().tcpNoDelay());
         subLoopInfo           = nh.subscribe<std_msgs::Float64MultiArray>(PROJECT_NAME + "/vins/loop/match_frame", 5, &mapOptimization::loopHandler, this, ros::TransportHints().tcpNoDelay());
 
@@ -233,8 +233,11 @@ public:
         matP = cv::Mat(6, 6, CV_32F, cv::Scalar::all(0));
     }
 
-    void laserCloudInfoHandler(const lvi_sam::cloud_infoConstPtr& msgIn)
+    void laserCloudInfoHandler(const lvi_sam_ikdtree::cloud_infoConstPtr& msgIn)
     {
+        ROS_INFO("*****************************************");
+        auto lhStart = std::chrono::high_resolution_clock::now();
+
         // extract time stamp
         timeLaserInfoStamp = msgIn->header.stamp;
         timeLaserInfoCur = msgIn->header.stamp.toSec();
@@ -258,7 +261,6 @@ public:
             // SLIDING-WINDOW：取消提取子图
             // extractSurroundingKeyFrames();
 
-            ROS_INFO("*****************************************");
             auto smStart = std::chrono::high_resolution_clock::now();
             scan2MapOptimization();
             auto smEnd = std::chrono::high_resolution_clock::now();
@@ -273,6 +275,9 @@ public:
 
             publishFrames();
         }
+        auto lhEnd = std::chrono::high_resolution_clock::now();
+        std::chrono::duration<double, std::milli> lhDuration = lhEnd - lhStart;
+        ROS_INFO("laserHandler cost : %.3f ms", lhDuration.count());
     }
 
     void gpsHandler(const nav_msgs::Odometry::ConstPtr& gpsMsg)
@@ -1539,10 +1544,11 @@ public:
             double distance_b = pointDistance(cloudKeyPoses3D->points[b],thisPose3D);
             return distance_a > distance_b;
         });
-        id = distanceWindow->front();
-        while(!distanceWindow->empty() && pointDistance(cloudKeyPoses3D->points[id],thisPose3D) > surroundingKeyframeSearchRadius)
+        while(!distanceWindow->empty())
         {
             id = distanceWindow->front();
+            if(pointDistance(cloudKeyPoses3D->points[id],thisPose3D) <= surroundingKeyframeSearchRadius) break;
+
             PointTypePose pose = cloudKeyPoses6D->points[id];
             pcl::PointCloud<PointType>::Ptr cloudToDelete(new pcl::PointCloud<PointType>());
 
@@ -1586,8 +1592,38 @@ public:
         *thisCornerKeyFrameGlobal = *transformPointCloud(thisCornerKeyFrame, &thisPose6D);
         *thisSurfKeyFrameGlobal = *transformPointCloud(thisSurfKeyFrame, &thisPose6D);
 
-        ikdtreeCornerFromMap->Add_Points(thisCornerKeyFrameGlobal->points, true);
-        ikdtreeSurfFromMap->Add_Points(thisSurfKeyFrameGlobal->points, true);
+        // 再次确认这段逻辑
+        if (thisCornerKeyFrameGlobal->size() > 0) {
+            // 显式拷贝构造 vector (解决崩溃问题)
+            // KD_TREE<PointType>::PointVector points_to_add;
+            // points_to_add.assign(thisCornerKeyFrameGlobal->points.begin(), thisCornerKeyFrameGlobal->points.end());
+
+            // 逻辑：如果是第一帧(空树)，用 Build 初始化；否则用 Add 增量更新
+            if (ikdtreeCornerFromMap->Root_Node == nullptr || ikdtreeCornerFromMap->size() == 0) {
+                // ikdtreeCornerFromMap->Build(points_to_add); // 这一步会构建完美平衡树
+                ikdtreeCornerFromMap->Build(thisCornerKeyFrameGlobal->points);
+            } else {
+                // ikdtreeCornerFromMap->Add_Points(points_to_add, true); // 这一步进行增量更新
+                ikdtreeCornerFromMap->Add_Points(thisCornerKeyFrameGlobal->points, true);
+            }
+        }
+        if (thisSurfKeyFrameGlobal->size() > 0) {
+            // 显式拷贝构造 vector (解决崩溃问题)
+            // KD_TREE<PointType>::PointVector points_to_add;
+            // points_to_add.assign(thisSurfKeyFrameGlobal->points.begin(), thisSurfKeyFrameGlobal->points.end());
+
+            // 逻辑：如果是第一帧(空树)，用 Build 初始化；否则用 Add 增量更新
+            if (ikdtreeSurfFromMap->Root_Node == nullptr || ikdtreeSurfFromMap->size() == 0) {
+                // ikdtreeSurfFromMap->Build(points_to_add); // 这一步会构建完美平衡树
+                ikdtreeSurfFromMap->Build(thisSurfKeyFrameGlobal->points);
+            } else {
+                // ikdtreeSurfFromMap->Add_Points(points_to_add, true); // 这一步进行增量更新
+                ikdtreeSurfFromMap->Add_Points(thisSurfKeyFrameGlobal->points, true);
+            }
+        }
+
+        // ikdtreeCornerFromMap->Add_Points(thisCornerKeyFrameGlobal->points, true);
+        // ikdtreeSurfFromMap->Add_Points(thisSurfKeyFrameGlobal->points, true);
 
         // save path for visualization
         updatePath(thisPose6D);
