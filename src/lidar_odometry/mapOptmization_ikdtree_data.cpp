@@ -3,7 +3,6 @@
 
 #include "ikd_Tree.h"
 #include <fstream>
-#include <unordered_set>
 
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
@@ -89,6 +88,10 @@ public:
     
     pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D;                // 关键帧筛选时距离判定
     pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D;            // 用于关键帧判定、将点云转换到world、关键帧筛选时时间判定
+    // SLIDING-WINDOW
+    std::shared_ptr<deque<int>> timeWindow;                         // 时间滑窗、距离滑窗
+    std::shared_ptr<deque<int>> distanceWindow; 
+    
 
     pcl::PointCloud<PointType>::Ptr laserCloudCornerLast; // corner feature set from odoOptimization
     pcl::PointCloud<PointType>::Ptr laserCloudSurfLast; // surf feature set from odoOptimization
@@ -115,10 +118,8 @@ public:
     KD_TREE<PointType>::Ptr ikdtreeCornerFromMap;                    // NOTE：子图ikdtree
     KD_TREE<PointType>::Ptr ikdtreeSurfFromMap;
 
-    // 新增：活跃关键帧集合
-    std::shared_ptr<std::unordered_set<int>> activeKeyFrame;
-
     pcl::KdTreeFLANN<PointType>::Ptr kdtreeSurroundingKeyPoses;      // 取消其作用
+    KD_TREE<PointType>::Ptr ikdtreeSurroundingKeyPoses;              // NOTE：周围关键帧的ikdtree
     pcl::KdTreeFLANN<PointType>::Ptr kdtreeHistoryKeyPoses;
 
     pcl::PointCloud<PointType>::Ptr latestKeyFrameCloud;
@@ -190,9 +191,11 @@ public:
     {
         cloudKeyPoses3D.reset(new pcl::PointCloud<PointType>());
         cloudKeyPoses6D.reset(new pcl::PointCloud<PointTypePose>());
+        timeWindow.reset(new deque<int>());                                 // NOTE：Window.reset
+        distanceWindow.reset(new deque<int>());
 
         // kdtreeSurroundingKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
-        // ikdtreeSurroundingKeyPoses.reset(new KD_TREE<PointType>(0.5, 0.6, surroundingKeyframeDensity));
+        ikdtreeSurroundingKeyPoses.reset(new KD_TREE<PointType>(0.5, 0.6, surroundingKeyframeDensity));
         kdtreeHistoryKeyPoses.reset(new pcl::KdTreeFLANN<PointType>());
 
         laserCloudCornerLast.reset(new pcl::PointCloud<PointType>()); // corner feature set from odoOptimization
@@ -220,10 +223,8 @@ public:
 
         // kdtreeCornerFromMap.reset(new pcl::KdTreeFLANN<PointType>());
         // kdtreeSurfFromMap.reset(new pcl::KdTreeFLANN<PointType>());
-        ikdtreeCornerFromMap.reset(new KD_TREE<PointType>(0.5, 0.6, mappingCornerLeafSize));    // SLIDING-WINDOW：ikd-tree初始化
+        ikdtreeCornerFromMap.reset(new KD_TREE<PointType>(0.5, 0.6, mappingCornerLeafSize));
         ikdtreeSurfFromMap.reset(new KD_TREE<PointType>(0.5, 0.6, mappingSurfLeafSize));
-
-        activeKeyFrame.reset(new std::unordered_set<int>());                                    // SLIDING-WINDOW：活跃关键帧集合初始化
 
         latestKeyFrameCloud.reset(new pcl::PointCloud<PointType>());
         nearHistoryKeyFrameCloud.reset(new pcl::PointCloud<PointType>());
@@ -1538,54 +1539,48 @@ public:
         thisPose6D.time = timeLaserInfoCur;
         cloudKeyPoses6D->push_back(thisPose6D);
 
-        // SLIDING-WINDOW：维护局部邻域
-        // 远端剔除：当新关键帧到来时，若某活跃帧KF的距离大于25m，判定其滑出局部邻域。
-        std::vector<int> framesToRemove; // 临时容器，存要删除的ID
-        // 第一步：筛选需要剔除的帧
-        for(auto id : *activeKeyFrame)
+        // SLIDING-WINDOW：维护窗口
+        int id = timeWindow->front();
+        // 时间
+        while(!timeWindow->empty() && timeLaserInfoCur - cloudKeyPoses6D->points[id].time > 10.0)
         {
-            if(pointDistance(cloudKeyPoses3D->points[id], thisPose3D) > surroundingKeyframeSearchRadius)
-            {
-                framesToRemove.push_back(id);
-            }
-        }
-        for(auto id : framesToRemove)
-        {
-            // 1.获取关键帧位姿
+            id = timeWindow->front();
             PointTypePose pose = cloudKeyPoses6D->points[id];
             pcl::PointCloud<PointType>::Ptr cloudToDelete(new pcl::PointCloud<PointType>());
-            // 2.将Lidar局部坐标系的点云转换到world
+            // NOTE：需要将local点云转换到world
             *cloudToDelete = *transformPointCloud(cornerCloudKeyFrames[id], &pose);
-            // 3.从ikd-tree中删除
             ikdtreeCornerFromMap->Delete_Points(cloudToDelete->points);
 
             *cloudToDelete = *transformPointCloud(surfCloudKeyFrames[id], &pose);
             ikdtreeSurfFromMap->Delete_Points(cloudToDelete->points);
 
-            // 4.将id从活跃帧集合中删除
-            activeKeyFrame->erase(id);
+            timeWindow->pop_front();
         }
-        // 历史召回：在全局历史关键帧中搜索与当前帧距离小于 25m 的候选帧。若发现满足距离条件
-        // 但在活跃集合中不存在的历史帧。系统调用 ikd-tree 的插入接口将该历史帧点云重新加载
-        // 至局部地图，并将其 ID 重新加入活跃集合。
-        for(int id = 0; id < cloudKeyPoses3D->size() - 1; ++id)
+        timeWindow->push_back(thisPose3D.intensity);
+        // 距离
+        std::sort(distanceWindow->begin(),distanceWindow->end(),[this,&thisPose3D](int a,int b){
+            double distance_a = pointDistance(cloudKeyPoses3D->points[a],thisPose3D);
+            double distance_b = pointDistance(cloudKeyPoses3D->points[b],thisPose3D);
+            return distance_a > distance_b;
+        });
+        while(!distanceWindow->empty())
         {
-            if(pointDistance(cloudKeyPoses3D->points[id],thisPose3D) <= surroundingKeyframeSearchRadius 
-                && !activeKeyFrame->count(id))
-            {   // 1.将历史关键帧id加入活跃帧集合
-                activeKeyFrame->insert(id);
-                // 2.获取该帧位姿
-                PointTypePose pose = cloudKeyPoses6D->points[id];
-                pcl::PointCloud<PointType>::Ptr historyKeyFrame(new pcl::PointCloud<PointType>());
-                // 3.将点云转换到world
-                *historyKeyFrame = *transformPointCloud(cornerCloudKeyFrames[id], &pose);
-                // 4.将点插入到ikdtree
-                ikdtreeCornerFromMap->Add_Points(historyKeyFrame->points, true);
+            id = distanceWindow->front();
+            if(pointDistance(cloudKeyPoses3D->points[id],thisPose3D) <= surroundingKeyframeSearchRadius) break;
 
-                *historyKeyFrame = *transformPointCloud(surfCloudKeyFrames[id], &pose);
-                ikdtreeSurfFromMap->Add_Points(historyKeyFrame->points, true);
-            }
+            PointTypePose pose = cloudKeyPoses6D->points[id];
+            pcl::PointCloud<PointType>::Ptr cloudToDelete(new pcl::PointCloud<PointType>());
+
+            *cloudToDelete = *transformPointCloud(cornerCloudKeyFrames[id], &pose);
+            ikdtreeCornerFromMap->Delete_Points(cloudToDelete->points);
+
+            *cloudToDelete = *transformPointCloud(surfCloudKeyFrames[id], &pose);
+            ikdtreeSurfFromMap->Delete_Points(cloudToDelete->points);
+
+            distanceWindow->pop_front();
         }
+        distanceWindow->push_back(thisPose3D.intensity);
+
 
         // cout << "****************************************************" << endl;
         // cout << "Pose covariance:" << endl;
@@ -1609,32 +1604,45 @@ public:
         // save key frame cloud
         cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
         surfCloudKeyFrames.push_back(thisSurfKeyFrame);
-
-        activeKeyFrame->insert(thisPose6D.intensity);                                                   // SLIDING-WINDOW：将当前关键帧id加入活跃集合
-        
-        pcl::PointCloud<PointType>::Ptr thisCornerKeyFrameGlobal(new pcl::PointCloud<PointType>());     // SLIDING-WINDOW：向ikdtree添加新关键帧点云
+        // SLIDING-WINDOW：向ikdtree添加新关键帧点云
+        pcl::PointCloud<PointType>::Ptr thisCornerKeyFrameGlobal(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr thisSurfKeyFrameGlobal(new pcl::PointCloud<PointType>());
-        // 将当前关键帧点云转换到world
+
         *thisCornerKeyFrameGlobal = *transformPointCloud(thisCornerKeyFrame, &thisPose6D);
         *thisSurfKeyFrameGlobal = *transformPointCloud(thisSurfKeyFrame, &thisPose6D);
 
+        // 再次确认这段逻辑
+        if (thisCornerKeyFrameGlobal->size() > 0) {
+            // 显式拷贝构造 vector (解决崩溃问题)
+            // KD_TREE<PointType>::PointVector points_to_add;
+            // points_to_add.assign(thisCornerKeyFrameGlobal->points.begin(), thisCornerKeyFrameGlobal->points.end());
 
-        if (thisCornerKeyFrameGlobal->size() > 0) 
-        {
             // 逻辑：如果是第一帧(空树)，用 Build 初始化；否则用 Add 增量更新
             if (ikdtreeCornerFromMap->Root_Node == nullptr || ikdtreeCornerFromMap->size() == 0) {
-                ikdtreeCornerFromMap->Build(thisCornerKeyFrameGlobal->points);  // 这一步会构建完美平衡树
+                // ikdtreeCornerFromMap->Build(points_to_add); // 这一步会构建完美平衡树
+                ikdtreeCornerFromMap->Build(thisCornerKeyFrameGlobal->points);
             } else {
+                // ikdtreeCornerFromMap->Add_Points(points_to_add, true); // 这一步进行增量更新
                 ikdtreeCornerFromMap->Add_Points(thisCornerKeyFrameGlobal->points, true);
             }
         }
         if (thisSurfKeyFrameGlobal->size() > 0) {
+            // 显式拷贝构造 vector (解决崩溃问题)
+            // KD_TREE<PointType>::PointVector points_to_add;
+            // points_to_add.assign(thisSurfKeyFrameGlobal->points.begin(), thisSurfKeyFrameGlobal->points.end());
+
+            // 逻辑：如果是第一帧(空树)，用 Build 初始化；否则用 Add 增量更新
             if (ikdtreeSurfFromMap->Root_Node == nullptr || ikdtreeSurfFromMap->size() == 0) {
+                // ikdtreeSurfFromMap->Build(points_to_add); // 这一步会构建完美平衡树
                 ikdtreeSurfFromMap->Build(thisSurfKeyFrameGlobal->points);
             } else {
+                // ikdtreeSurfFromMap->Add_Points(points_to_add, true); // 这一步进行增量更新
                 ikdtreeSurfFromMap->Add_Points(thisSurfKeyFrameGlobal->points, true);
             }
         }
+
+        // ikdtreeCornerFromMap->Add_Points(thisCornerKeyFrameGlobal->points, true);
+        // ikdtreeSurfFromMap->Add_Points(thisSurfKeyFrameGlobal->points, true);
 
         // save path for visualization
         updatePath(thisPose6D);

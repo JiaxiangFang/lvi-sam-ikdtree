@@ -210,7 +210,7 @@ void process()
         std::unique_lock<std::mutex> lk(m_buf);
         con.wait(lk, [&]
                  {
-            return (measurements = getMeasurements()).size() != 0;
+            return (measurements = getMeasurements()).size() != 0;  // 取出两图像间的IMU数据与第二帧图像
                  });
         lk.unlock();
 

@@ -29,8 +29,6 @@ bool first_image_flag = true;
 double last_image_time = 0;
 bool init_pub = 0;
 
-
-
 void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 {
     double cur_img_time = img_msg->header.stamp.toSec();
@@ -160,12 +158,17 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
                 }
             }
         }
+        int total_raw_features = trackerData[0].cur_pts.size();
+        ROS_INFO("[Image %lf] Total raw feature count: %d", cur_img_time, total_raw_features);
 
         feature_points->channels.push_back(id_of_point);
         feature_points->channels.push_back(u_of_point);
         feature_points->channels.push_back(v_of_point);
         feature_points->channels.push_back(velocity_x_of_point);
         feature_points->channels.push_back(velocity_y_of_point);
+
+        int valid_feat_num = feature_points->points.size();         // 最终发布的有效特征点数量
+        ROS_INFO("[Image %lf] Published valid feature count (track_cnt>1): %d", cur_img_time, valid_feat_num);
 
         // get feature depth from lidar point cloud
         pcl::PointCloud<PointType>::Ptr depth_cloud_temp(new pcl::PointCloud<PointType>());
@@ -221,7 +224,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
     }
 }
 
-
+// 订阅去畸变后的原始点云（非特征点云，且没有经过降采样）
 void lidar_callback(const sensor_msgs::PointCloud2ConstPtr& laser_msg)
 {
     static int lidar_count = -1;
@@ -303,6 +306,7 @@ void lidar_callback(const sensor_msgs::PointCloud2ConstPtr& laser_msg)
     depthCloud->clear();
     for (int i = 0; i < (int)cloudQueue.size(); ++i)
         *depthCloud += cloudQueue[i];
+    ROS_INFO("VIS Raw Depth Clouds' Size = %d", depthCloud->size());
 
     // 9. downsample global cloud
     pcl::PointCloud<PointType>::Ptr depthCloudDS(new pcl::PointCloud<PointType>());
@@ -310,6 +314,7 @@ void lidar_callback(const sensor_msgs::PointCloud2ConstPtr& laser_msg)
     downSizeFilter.setInputCloud(depthCloud);
     downSizeFilter.filter(*depthCloudDS);
     *depthCloud = *depthCloudDS;
+    ROS_INFO("VIS Depth Clouds' Size After Filter = %d", depthCloud->size());
 }
 
 int main(int argc, char **argv)
