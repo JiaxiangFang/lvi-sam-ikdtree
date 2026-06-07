@@ -33,6 +33,13 @@ find_package(OpenMP REQUIRED)
 find_package(PCL 1.8 REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Ceres REQUIRED)
+# Some ROS images ship GTSAM cmake files but the corresponding shared objects may be missing/renamed.
+# If ROS gtsam runtime is unavailable, force CMake to resolve GTSAM from /usr/local.
+if(EXISTS "/opt/ros/noetic/lib/cmake/GTSAM/GTSAMConfig.cmake" AND
+   NOT EXISTS "/opt/ros/noetic/lib/x86_64-linux-gnu/libgtsam.so.4.2.0" AND
+   EXISTS "/usr/local/lib/cmake/GTSAM/GTSAMConfig.cmake")
+    set(GTSAM_DIR "/usr/local/lib/cmake/GTSAM" CACHE PATH "GTSAM config directory" FORCE)
+endif()
 find_package(GTSAM REQUIRED QUIET)
 find_package(Boost REQUIRED COMPONENTS filesystem program_options system timer)
 

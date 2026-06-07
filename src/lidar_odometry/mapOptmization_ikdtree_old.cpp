@@ -1538,9 +1538,6 @@ public:
         thisPose6D.time = timeLaserInfoCur;
         cloudKeyPoses6D->push_back(thisPose6D);
 
-        // 新逻辑（生效）：每次新增关键帧后刷新历史位姿KD-Tree，供历史召回和回环后重建复用
-        kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
-
         // SLIDING-WINDOW：维护局部邻域
         // 远端剔除：当新关键帧到来时，若某活跃帧KF的距离大于25m，判定其滑出局部邻域。
         std::vector<int> framesToRemove; // 临时容器，存要删除的ID
@@ -1568,50 +1565,26 @@ public:
             // 4.将id从活跃帧集合中删除
             activeKeyFrame->erase(id);
         }
-        // 旧逻辑（保留用于对比）：O(N) 全局线性遍历历史关键帧
-        // for(int id = 0; id < cloudKeyPoses3D->size() - 1; ++id)
-        // {
-        //     if(pointDistance(cloudKeyPoses3D->points[id],thisPose3D) <= surroundingKeyframeSearchRadius
-        //         && !activeKeyFrame->count(id))
-        //     {
-        //         activeKeyFrame->insert(id);
-        //         PointTypePose pose = cloudKeyPoses6D->points[id];
-        //         pcl::PointCloud<PointType>::Ptr historyKeyFrame(new pcl::PointCloud<PointType>());
-        //         *historyKeyFrame = *transformPointCloud(cornerCloudKeyFrames[id], &pose);
-        //         ikdtreeCornerFromMap->Add_Points(historyKeyFrame->points, true);
-        //
-        //         *historyKeyFrame = *transformPointCloud(surfCloudKeyFrames[id], &pose);
-        //         ikdtreeSurfFromMap->Add_Points(historyKeyFrame->points, true);
-        //     }
-        // }
-
-        // 新逻辑（生效）：用历史位姿KD-Tree做半径检索，避免全局线性扫描
-        std::vector<int> recallCandidates;
-        std::vector<float> recallCandidateSqDist;
-        const int currentKeyIdx = static_cast<int>(cloudKeyPoses3D->size()) - 1;
-        kdtreeHistoryKeyPoses->radiusSearch(thisPose3D,
-                                            surroundingKeyframeSearchRadius,
-                                            recallCandidates,
-                                            recallCandidateSqDist,
-                                            0);
-        for (int id : recallCandidates)
+        // 历史召回：在全局历史关键帧中搜索与当前帧距离小于 25m 的候选帧。若发现满足距离条件
+        // 但在活跃集合中不存在的历史帧。系统调用 ikd-tree 的插入接口将该历史帧点云重新加载
+        // 至局部地图，并将其 ID 重新加入活跃集合。
+        for(int id = 0; id < cloudKeyPoses3D->size() - 1; ++id)
         {
-            if (id == currentKeyIdx)
-                continue;
-            if (id < 0 || id >= static_cast<int>(cornerCloudKeyFrames.size()))
-                continue;
-            if (activeKeyFrame->count(id))
-                continue;
+            if(pointDistance(cloudKeyPoses3D->points[id],thisPose3D) <= surroundingKeyframeSearchRadius 
+                && !activeKeyFrame->count(id))
+            {   // 1.将历史关键帧id加入活跃帧集合
+                activeKeyFrame->insert(id);
+                // 2.获取该帧位姿
+                PointTypePose pose = cloudKeyPoses6D->points[id];
+                pcl::PointCloud<PointType>::Ptr historyKeyFrame(new pcl::PointCloud<PointType>());
+                // 3.将点云转换到world
+                *historyKeyFrame = *transformPointCloud(cornerCloudKeyFrames[id], &pose);
+                // 4.将点插入到ikdtree
+                ikdtreeCornerFromMap->Add_Points(historyKeyFrame->points, true);
 
-            activeKeyFrame->insert(id);
-            PointTypePose pose = cloudKeyPoses6D->points[id];
-            pcl::PointCloud<PointType>::Ptr historyKeyFrame(new pcl::PointCloud<PointType>());
-
-            *historyKeyFrame = *transformPointCloud(cornerCloudKeyFrames[id], &pose);
-            ikdtreeCornerFromMap->Add_Points(historyKeyFrame->points, true);
-
-            *historyKeyFrame = *transformPointCloud(surfCloudKeyFrames[id], &pose);
-            ikdtreeSurfFromMap->Add_Points(historyKeyFrame->points, true);
+                *historyKeyFrame = *transformPointCloud(surfCloudKeyFrames[id], &pose);
+                ikdtreeSurfFromMap->Add_Points(historyKeyFrame->points, true);
+            }
         }
 
         // cout << "****************************************************" << endl;
@@ -1694,61 +1667,6 @@ public:
 
                 updatePath(cloudKeyPoses6D->points[i]);
             }
-
-            // 旧逻辑（保留用于对比）：仅更新位姿，不重建局部地图
-            // aLoopIsClosed = false;
-            // ++imuPreintegrationResetId;
-
-            // 新逻辑（生效）：回环后严格重建局部地图，避免形变导致的邻域边界错配
-            activeKeyFrame->clear();
-            ikdtreeCornerFromMap.reset(new KD_TREE<PointType>(0.5, 0.6, mappingCornerLeafSize));
-            ikdtreeSurfFromMap.reset(new KD_TREE<PointType>(0.5, 0.6, mappingSurfLeafSize));
-
-            // 使用更新后的关键帧位姿重建历史位姿KD-Tree
-            kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
-
-            std::vector<int> pointSearchIndRebuild;
-            std::vector<float> pointSearchSqDisRebuild;
-            PointType currentPose3D = cloudKeyPoses3D->back();
-            kdtreeHistoryKeyPoses->radiusSearch(currentPose3D,
-                                                surroundingKeyframeSearchRadius,
-                                                pointSearchIndRebuild,
-                                                pointSearchSqDisRebuild,
-                                                0);
-
-            pcl::PointCloud<PointType>::Ptr rebuildCornerCloud(new pcl::PointCloud<PointType>());
-            pcl::PointCloud<PointType>::Ptr rebuildSurfCloud(new pcl::PointCloud<PointType>());
-
-            for (int id : pointSearchIndRebuild)
-            {
-                if (id < 0 || id >= static_cast<int>(cornerCloudKeyFrames.size()))
-                    continue;
-
-                activeKeyFrame->insert(id);
-
-                PointTypePose pose = cloudKeyPoses6D->points[id];
-                pcl::PointCloud<PointType>::Ptr cornerGlobal = transformPointCloud(cornerCloudKeyFrames[id], &pose);
-                pcl::PointCloud<PointType>::Ptr surfGlobal = transformPointCloud(surfCloudKeyFrames[id], &pose);
-
-                rebuildCornerCloud->points.insert(rebuildCornerCloud->points.end(),
-                                                  cornerGlobal->points.begin(),
-                                                  cornerGlobal->points.end());
-                rebuildSurfCloud->points.insert(rebuildSurfCloud->points.end(),
-                                                surfGlobal->points.begin(),
-                                                surfGlobal->points.end());
-            }
-
-            rebuildCornerCloud->width = rebuildCornerCloud->points.size();
-            rebuildCornerCloud->height = 1;
-            rebuildCornerCloud->is_dense = false;
-            rebuildSurfCloud->width = rebuildSurfCloud->points.size();
-            rebuildSurfCloud->height = 1;
-            rebuildSurfCloud->is_dense = false;
-
-            if (!rebuildCornerCloud->points.empty())
-                ikdtreeCornerFromMap->Build(rebuildCornerCloud->points);
-            if (!rebuildSurfCloud->points.empty())
-                ikdtreeSurfFromMap->Build(rebuildSurfCloud->points);
 
             aLoopIsClosed = false;
             // ID for reseting IMU pre-integration
