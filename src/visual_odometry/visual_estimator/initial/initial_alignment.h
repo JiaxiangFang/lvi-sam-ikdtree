@@ -74,16 +74,18 @@ class odometryRegister
 public:
 
     ros::NodeHandle n;
-    tf::Quaternion q_lidar_to_cam;
-    Eigen::Quaterniond q_lidar_to_cam_eigen;
+    // vins_world 与激光里程计 world 之间相差绕 Z 轴 180°，用于把激光 odom 对齐到 vins_world
+    tf::Quaternion vins_world_tf_odom;          // tf 形式（作用于姿态）
+    Eigen::Quaterniond vins_world_q_odom;       // eigen 形式（作用于位置/速度）
 
     ros::Publisher pub_latest_odometry; 
 
     odometryRegister(ros::NodeHandle n_in):
     n(n_in)
     {
-        q_lidar_to_cam = tf::Quaternion(0, 1, 0, 0); // rotate orientation // mark: camera - lidar
-        q_lidar_to_cam_eigen = Eigen::Quaterniond(0, 0, 0, 1); // rotate position by pi, (w, x, y, z) // mark: camera - lidar
+        // 绕 Z 轴 180°：(w,x,y,z) = (0,0,0,1)
+        vins_world_tf_odom = tf::createQuaternionFromRPY(0, 0, M_PI);
+        vins_world_q_odom = Eigen::Quaterniond(0, 0, 0, 1);
         // pub_latest_odometry = n.advertise<nav_msgs::Odometry>("odometry/test", 1000);
     }
 
@@ -126,18 +128,31 @@ public:
             return odometry_channel;
         }
 
-        // convert odometry rotation from lidar ROS frame to VINS camera frame (only rotation, assume lidar, camera, and IMU are close enough)
+        // ===================== 外参驱动：把激光 odom（LiDAR 位姿）转换为 VINS 的 IMU 位姿 =====================
+        // 原版硬编码 q_lidar_to_cam(0,1,0,0) + 位置绕 Z 轴 180°，只适用于原传感器装配。
+        // 现改为由 imu_to_lidar 外参构造，支持任意安装方式；原数据集填 (平移=0, ry=π) 即等价。
         tf::Quaternion q_odom_lidar;
         tf::quaternionMsgToTF(odomCur.pose.pose.orientation, q_odom_lidar);
 
-        tf::Quaternion q_odom_cam = tf::createQuaternionFromRPY(0, 0, M_PI) * (q_odom_lidar * q_lidar_to_cam); // global rotate by pi // mark: camera - lidar
-        tf::quaternionTFToMsg(q_odom_cam, odomCur.pose.pose.orientation);
+        //   odom_T_lidar：LiDAR 在激光 odom world 下的位姿
+        //   lidar_T_imu ：把点从 IMU 系变换到 LiDAR 系（外参，与 visualization 中一致）
+        //   odom_T_imu  ：IMU 在激光 odom world 下的位姿
+        tf::Transform odom_T_lidar = tf::Transform(q_odom_lidar,
+            tf::Vector3(odomCur.pose.pose.position.x, odomCur.pose.pose.position.y, odomCur.pose.pose.position.z));
+        tf::Transform lidar_T_imu = tf::Transform(
+            tf::createQuaternionFromRPY(IMU_TO_LIDAR_ROLL, IMU_TO_LIDAR_PITCH, IMU_TO_LIDAR_YAW),
+            tf::Vector3(IMU_TO_LIDAR_TX, IMU_TO_LIDAR_TY, IMU_TO_LIDAR_TZ));
+        tf::Transform odom_T_imu = odom_T_lidar * lidar_T_imu;
 
-        // convert odometry position from lidar ROS frame to VINS camera frame
-        Eigen::Vector3d p_eigen(odomCur.pose.pose.position.x, odomCur.pose.pose.position.y, odomCur.pose.pose.position.z);
+        // 姿态：再绕 Z 轴 180° 对齐到 vins_world
+        tf::Quaternion world_q_imu = vins_world_tf_odom * odom_T_imu.getRotation();
+        tf::quaternionTFToMsg(world_q_imu, odomCur.pose.pose.orientation);
+
+        // 位置/速度：取 IMU 位姿的平移，并绕 Z 轴 180° 对齐到 vins_world
+        Eigen::Vector3d p_eigen(odom_T_imu.getOrigin().x(), odom_T_imu.getOrigin().y(), odom_T_imu.getOrigin().z());
         Eigen::Vector3d v_eigen(odomCur.twist.twist.linear.x, odomCur.twist.twist.linear.y, odomCur.twist.twist.linear.z);
-        Eigen::Vector3d p_eigen_new = q_lidar_to_cam_eigen * p_eigen;
-        Eigen::Vector3d v_eigen_new = q_lidar_to_cam_eigen * v_eigen;
+        Eigen::Vector3d p_eigen_new = vins_world_q_odom * p_eigen;
+        Eigen::Vector3d v_eigen_new = vins_world_q_odom * v_eigen;
 
         odomCur.pose.pose.position.x = p_eigen_new.x();
         odomCur.pose.pose.position.y = p_eigen_new.y();

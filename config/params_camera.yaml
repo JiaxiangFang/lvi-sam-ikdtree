@@ -21,6 +21,15 @@ lidar_to_cam_rx: 0.0
 lidar_to_cam_ry: 0.0
 lidar_to_cam_rz: -0.04
 
+# imu 到 lidar 的外参 (IMU -> LiDAR)
+# 数值 (平移=0, ry=π) 复现原版硬编码 q_cam_to_lidar(0,1,0,0)，保证原数据集零回归
+imu_to_lidar_tx: 0.0
+imu_to_lidar_ty: 0.0
+imu_to_lidar_tz: 0.0
+imu_to_lidar_rx: 0.0
+imu_to_lidar_ry: 3.14159265358979   # π，绕 Y 轴 180°
+imu_to_lidar_rz: 0.0
+
 # camera model
 model_type: MEI
 camera_name: camera

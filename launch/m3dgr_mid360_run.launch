@@ -1,0 +1,12 @@
+<launch>
+
+    <!--- Robot State TF -->
+    <include file="$(find lvi_sam_ikdtree)/launch/include/module_robot_state_publisher.launch" />
+
+    <!--- Run Rviz-->
+    <include file="$(find lvi_sam_ikdtree)/launch/include/module_rviz.launch" />
+
+    <!--- SAM (M3DGR indoor / Livox Mid360) -->
+    <include file="$(find lvi_sam_ikdtree)/launch/include/m3dgr_mid360_module_sam.launch" />
+
+</launch>

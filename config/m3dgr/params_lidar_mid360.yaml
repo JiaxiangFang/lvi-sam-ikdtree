@@ -1,0 +1,77 @@
+# project name
+PROJECT_NAME: "lvi_sam_ikdtree"
+
+lvi_sam_ikdtree:
+
+  # Topics
+  pointCloudTopic: "/livox/lidar"             # repub 输出的统一点云话题 (来自 livox_repub mid360_repub.launch)
+  imuTopic: "/camera/imu"                     # M3DGR RealSense 6轴 IMU
+
+  # Heading
+  useImuHeadingInitialization: false
+
+  # Export settings
+  savePCD: false
+  savePCDDirectory: "/Downloads/LOAM/"
+
+  # Save final trajectory (TUM format: timestamp tx ty tz qx qy qz qw), auto-saved on Ctrl+C
+  saveTrajectory: true
+  saveTrajectoryDirectory: "~/lvi_sam_ikd_traj_mid360.txt"
+
+  # Sensor Settings  (Livox Mid360)
+  N_SCAN: 4                                   # Mid360 等效线数
+  Horizon_SCAN: 6000
+  timeField: "time"
+  downsampleRate: 1
+
+  # IMU Settings  (M3DGR camera/imu)
+  imuAccNoise: 1.2374091609523514e-02
+  imuGyrNoise: 3.0032654435730201e-03
+  imuAccBiasN: 1.9218003442176448e-04
+  imuGyrBiasN: 5.4692100664858005e-05
+  imuGravity: 9.79
+
+  # Extrinsics (lidar -> IMU)
+  # 取自 M3DGR 官方标定 calibration.md 的 "camera_imu 2 mid360"（即 lidar->IMU）。
+  # 注意：旧值(0.0877271,0.491574,...)来自过时/错误标定，与官方差约 2°+19mm，是 mid360 漂移主因之一。
+  extrinsicTrans: [0.046263, -0.00420981, -0.460019]
+  extrinsicRot: [0.0981574, 0.514299, 0.851975, -0.995106, 0.0409386, 0.0899349, 0.0113748, -0.856633, 0.515801]
+  extrinsicRPY: [0.0981574, -0.995106, 0.0113748, 0.514299, 0.0409386, -0.856633, 0.851975, 0.0899349, 0.515801]
+
+  # LOAM feature threshold
+  edgeThreshold: 1.0
+  surfThreshold: 0.1
+  edgeFeatureMinValidNum: 10
+  surfFeatureMinValidNum: 100
+
+  # voxel filter paprams
+  odometrySurfLeafSize: 0.4
+  mappingCornerLeafSize: 0.2
+  mappingSurfLeafSize: 0.4
+
+  # robot motion constraint (in case you are using a 2D robot)
+  z_tollerance: 1000
+  rotation_tollerance: 1000
+
+  # CPU Params
+  numberOfCores: 4
+  mappingProcessInterval: 0.15
+
+  # Surrounding map
+  surroundingkeyframeAddingDistThreshold: 1.0
+  surroundingkeyframeAddingAngleThreshold: 0.2
+  surroundingKeyframeDensity: 2.0
+  surroundingKeyframeSearchRadius: 50.0
+
+  # Loop closure
+  loopClosureEnableFlag: true
+  surroundingKeyframeSize: 25
+  historyKeyframeSearchRadius: 15.0
+  historyKeyframeSearchTimeDiff: 30.0
+  historyKeyframeSearchNum: 25
+  historyKeyframeFitnessScore: 0.3
+
+  # Visualization
+  globalMapVisualizationSearchRadius: 1000.0
+  globalMapVisualizationPoseDensity: 10.0
+  globalMapVisualizationLeafSize: 1.0

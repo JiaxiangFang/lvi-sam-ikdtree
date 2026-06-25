@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <queue>
 #include <deque>
+#include "mahonyMine.h"   // [M3DGR] 6-axis IMU attitude estimation (Mahony AHRS)
 #include <iostream>
 #include <fstream>
 #include <ctime>
@@ -85,6 +86,10 @@ public:
     // Save pcd
     bool savePCD;
     string savePCDDirectory;
+
+    // Save trajectory (TUM format)
+    bool saveTrajectory;
+    string saveTrajectoryDirectory;
 
     // Velodyne Sensor Configuration: Velodyne
     int N_SCAN;
@@ -143,6 +148,9 @@ public:
     float globalMapVisualizationPoseDensity;
     float globalMapVisualizationLeafSize;
 
+    // [M3DGR] Mahony filter to recover orientation from a 6-axis IMU (no orientation field)
+    Mahony filter;
+
     ParamServer()
     {
         nh.param<std::string>("/PROJECT_NAME", PROJECT_NAME, "sam");
@@ -161,6 +169,9 @@ public:
 
         nh.param<bool>(PROJECT_NAME + "/savePCD", savePCD, false);
         nh.param<std::string>(PROJECT_NAME + "/savePCDDirectory", savePCDDirectory, "/tmp/loam/");
+
+        nh.param<bool>(PROJECT_NAME + "/saveTrajectory", saveTrajectory, false);
+        nh.param<std::string>(PROJECT_NAME + "/saveTrajectoryDirectory", saveTrajectoryDirectory, "/tmp/lvi_sam_trajectory.txt");
 
         nh.param<int>(PROJECT_NAME + "/N_SCAN", N_SCAN, 16);
         nh.param<int>(PROJECT_NAME + "/Horizon_SCAN", Horizon_SCAN, 1800);
@@ -230,8 +241,17 @@ public:
         imu_out.angular_velocity.y = gyr.y();
         imu_out.angular_velocity.z = gyr.z();
         // rotate roll pitch yaw
+        // [M3DGR] When the IMU has no orientation (6-axis, e.g. RealSense /camera/imu),
+        //         estimate attitude online with a Mahony AHRS filter.
+        filter.MahonyAHRSupdateIMU(imu_out.angular_velocity.x, imu_out.angular_velocity.y, imu_out.angular_velocity.z,
+                                   imu_out.linear_acceleration.x, imu_out.linear_acceleration.y, imu_out.linear_acceleration.z);
+        Eigen::Quaterniond q_mahony(filter.getQuaternionW(), filter.getQuaternionX(), filter.getQuaternionY(), filter.getQuaternionZ());
         Eigen::Quaterniond q_from(imu_in.orientation.w, imu_in.orientation.x, imu_in.orientation.y, imu_in.orientation.z);
-        Eigen::Quaterniond q_final = q_from * extQRPY;
+        Eigen::Quaterniond q_final;
+        if (q_from.w() == 0.0 && q_from.x() == 0.0 && q_from.y() == 0.0 && q_from.z() == 0.0)
+            q_final = q_mahony;          // 6-axis IMU: use Mahony-estimated orientation
+        else
+            q_final = q_from * extQRPY;  // 9-axis IMU: original behaviour (unchanged)
         imu_out.orientation.x = q_final.x();
         imu_out.orientation.y = q_final.y();
         imu_out.orientation.z = q_final.z();

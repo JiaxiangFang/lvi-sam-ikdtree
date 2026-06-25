@@ -1,0 +1,108 @@
+%YAML:1.0
+
+# Project
+project_name: "lvi_sam_ikdtree"
+
+#common parameters
+imu_topic: "/camera/imu"
+image_topic: "/camera/color/image_raw"
+point_cloud_topic: "lvi_sam_ikdtree/lidar/deskew/cloud_deskewed"
+
+# Lidar Params
+use_lidar: 1                     # whether use depth info from lidar or not
+lidar_skip: 3                    # skip this amount of scans
+align_camera_lidar_estimation: 1 # align camera and lidar estimation for visualization
+
+# lidar to camera extrinsic  (Avia outdoor)
+lidar_to_cam_tx: 0.0178448
+lidar_to_cam_ty: 0.0894589
+lidar_to_cam_tz: 0.161556
+lidar_to_cam_rx: -0.1816645
+lidar_to_cam_ry: -1.5493643
+lidar_to_cam_rz: 1.7248959
+
+# imu 到 lidar 的外参 (IMU -> LiDAR, camera_imu 到 avia)
+# 取自 params_lidar_avia.yaml 的 extrinsicRot / extrinsicTrans (lidar->IMU 标定)：
+#   - 平移 = extrinsicTrans
+#   - 旋转 = extrinsicRot 的精确 RPY 分解（tf 约定 Rz(rz)*Ry(ry)*Rx(rx)，回代误差 ~3.6e-7）
+# 用于 VINS↔激光里程计的位姿移交（替代原硬编码 q_cam_to_lidar(0,1,0,0)）
+# 注：参考项目 m3dgr_params_camera.yaml 误把 roll/yaw 填反，有 ~6% 旋转误差；此处用物理精确值
+imu_to_lidar_tx: -0.19501
+imu_to_lidar_ty: 0.0471106
+imu_to_lidar_tz: 0.0870882
+imu_to_lidar_rx: -1.5809209
+imu_to_lidar_ry: 0.0298375
+imu_to_lidar_rz: -1.5204866
+
+# camera model
+model_type: PINHOLE
+camera_name: camera
+
+# Mono camera config  (RealSense color)
+image_width: 640
+image_height: 480
+distortion_parameters:
+   k1: 0.0
+   k2: 0.0
+   p1: 0.0
+   p2: 0.0
+projection_parameters:
+   fx: 607.79772949218
+   fy: 607.83526613281
+   cx: 328.79772949218
+   cy: 245.53321838378
+
+#imu parameters
+acc_n: 1.2820343288774358e-01
+gyr_n: 2.1309311394972831e-02
+acc_w: 1.3677912958097768e-02
+gyr_w: 3.6603917782528627e-04
+g_norm: 9.805
+
+# Extrinsic parameter between IMU and Camera.
+estimate_extrinsic: 0
+#Rotation from camera frame to imu frame, imu^R_cam
+extrinsicRotation: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 0.99957087 , 0.00215313 , 0.02921355 ,
+          -0.00192891  ,0.99996848, -0.00770122 ,
+          -0.02922921 , 0.00764156  ,0.99954353  ]
+#Translation from camera frame to imu frame, imu^T_cam
+extrinsicTranslation: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: d
+   data: [0.03668114, -0.00477653, 0.0316039]
+
+#feature traker paprameters
+max_cnt: 150            # max feature number in feature tracking
+min_dist: 20            # min distance between two features
+freq: 20                # frequence (Hz) of publish tracking result.
+F_threshold: 1.0        # ransac threshold (pixel)
+show_track: 1           # publish tracking image as topic
+equalize: 1             # if image is too dark or light, trun on equalize to find enough features
+fisheye: 0              # PINHOLE 相机，关闭鱼眼掩膜
+
+#optimization parameters
+max_solver_time: 0.04   # max solver itration time (ms), to guarantee real time
+max_num_iterations: 10  # max solver itrations, to guarantee real time
+keyframe_parallax: 10.0 # keyframe selection threshold (pixel)
+
+#unsynchronization parameters
+estimate_td: 0          # online estimate time offset between camera and imu
+td: 0                   # initial value of time offset. unit: s.
+
+#rolling shutter parameters
+rolling_shutter: 0      # 0: global shutter camera, 1: rolling shutter camera
+rolling_shutter_tr: 0   # unit: s.
+
+#loop closure parameters
+loop_closure: 1                    # start loop closure
+skip_time: 0.0
+skip_dist: 0.0
+debug_image: 0
+match_image_scale: 0.5
+vocabulary_file: "/config/brief_k10L6.bin"
+brief_pattern_file: "/config/brief_pattern.yml"

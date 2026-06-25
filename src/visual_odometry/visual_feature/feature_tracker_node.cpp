@@ -176,7 +176,8 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
         *depth_cloud_temp = *depthCloud;
         mtx_lidar.unlock();
 
-        sensor_msgs::ChannelFloat32 depth_of_points = depthRegister->get_depth(img_msg->header.stamp, show_img, depth_cloud_temp, trackerData[0].m_camera, feature_points->points);
+        sensor_msgs::ChannelFloat32 depth_of_points = depthRegister->get_depth(img_msg->header.stamp, show_img, 
+            depth_cloud_temp, trackerData[0].m_camera, feature_points->points);
         feature_points->channels.push_back(depth_of_points);
         
         // skip the first image; since no optical speed on frist image
@@ -211,6 +212,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
                         if(j < depth_of_points.values.size())
                         {
                             if (depth_of_points.values[j] > 0)
+                                // 成功恢复深度 绿色
                                 cv::circle(tmp_img, trackerData[i].cur_pts[j], 4, cv::Scalar(0, 255, 0), 4);
                             else
                                 cv::circle(tmp_img, trackerData[i].cur_pts[j], 4, cv::Scalar(0, 0, 255), 4);
@@ -228,7 +230,7 @@ void img_callback(const sensor_msgs::ImageConstPtr &img_msg)
 void lidar_callback(const sensor_msgs::PointCloud2ConstPtr& laser_msg)
 {
     static int lidar_count = -1;
-    if (++lidar_count % (LIDAR_SKIP+1) != 0)
+    if (++lidar_count % (LIDAR_SKIP+1) != 0)        // LIDAR_SKIP：3
         return;
 
     // 0. listen to transform
@@ -249,6 +251,7 @@ void lidar_callback(const sensor_msgs::PointCloud2ConstPtr& laser_msg)
     zCur = transform.getOrigin().z();
     tf::Matrix3x3 m(transform.getRotation());
     m.getRPY(rollCur, pitchCur, yawCur);
+    // 当前相机位姿
     Eigen::Affine3f transNow = pcl::getTransformation(xCur, yCur, zCur, rollCur, pitchCur, yawCur);
 
     // 1. convert laser cloud message to pcl
@@ -264,19 +267,38 @@ void lidar_callback(const sensor_msgs::PointCloud2ConstPtr& laser_msg)
     *laser_cloud_in = *laser_cloud_in_ds;
 
     // 3. filter lidar points (only keep points in camera view)
+    // ===================== 相机视锥裁剪（按相机朝向，而非激光朝向）=====================
+    // 原版直接用 p.x>=0 裁剪，假设“激光 +x ≈ 相机前方”。M3DGR 的 lidar_to_cam 是 ~90° 旋转，
+    // 激光 +x 并不指向相机前方，直接裁剪会保留错误的半空间 → 视觉特征拿到错误深度 → VINS 发散。
+    // 这里先把激光点旋到“相机对齐的标准轴(x前 y左 z上)”得到 p_cam，再按 p_cam.x>=0 判断是否在相机视野内；
+    // 只用于判定，保留的仍是激光原始坐标 p（深度后续在 feature_tracker.h 中统一归一化）。
+    Eigen::Affine3f cam_R_lidar_original = pcl::getTransformation(0, 0, 0, L_C_RX, L_C_RY, L_C_RZ); // 仅旋转：lidar->cam
+    Eigen::Matrix4f lidar_normal_R_cam;   // 相机(z前x右y下) -> 标准轴(x前y左z上)
+    lidar_normal_R_cam << 0, 0, 1, 0,
+                         -1, 0, 0, 0,
+                          0, -1, 0, 0,
+                          0, 0, 0, 1;
+    Eigen::Matrix4f lidar_normal_R_original = lidar_normal_R_cam * cam_R_lidar_original.matrix(); // 激光原始轴 -> 标准轴
     pcl::PointCloud<PointType>::Ptr laser_cloud_in_filter(new pcl::PointCloud<PointType>());
     for (int i = 0; i < (int)laser_cloud_in->size(); ++i)
     {
         PointType p = laser_cloud_in->points[i];
-        if (p.x >= 0 && abs(p.y / p.x) <= 10 && abs(p.z / p.x) <= 10)
+        PointType p_cam;  // 旋到相机对齐的标准轴，仅用于视野判定
+        p_cam.x = lidar_normal_R_original(0, 0) * p.x + lidar_normal_R_original(0, 1) * p.y + lidar_normal_R_original(0, 2) * p.z;
+        p_cam.y = lidar_normal_R_original(1, 0) * p.x + lidar_normal_R_original(1, 1) * p.y + lidar_normal_R_original(1, 2) * p.z;
+        p_cam.z = lidar_normal_R_original(2, 0) * p.x + lidar_normal_R_original(2, 1) * p.y + lidar_normal_R_original(2, 2) * p.z;
+        if (p_cam.x >= 0 && abs(p_cam.y / p_cam.x) <= 10 && abs(p_cam.z / p_cam.x) <= 10)
             laser_cloud_in_filter->push_back(p);
     }
     *laser_cloud_in = *laser_cloud_in_filter;
 
-    // TODO: transform to IMU body frame
-    // 4. offset T_lidar -> T_camera 
+    // 4. offset T_lidar -> T_camera
+    // ===================== 仅平移到相机中心（不旋转）=====================
+    // 与 vins_body_ros = LiDAR 系（visualization.cpp 的 world_T_lidar）保持一致：点云始终留在激光原始轴下，
+    // 这里只把坐标原点平移到相机光心。旋转对齐放到 feature_tracker.h 的深度归一化里统一处理。
     pcl::PointCloud<PointType>::Ptr laser_cloud_offset(new pcl::PointCloud<PointType>());
-    Eigen::Affine3f transOffset = pcl::getTransformation(L_C_TX, L_C_TY, L_C_TZ, L_C_RX, L_C_RY, L_C_RZ);
+    Eigen::Affine3f transOffset = pcl::getTransformation(L_C_TX, L_C_TY, L_C_TZ, 0, 0, 0);
+    transOffset = transOffset.inverse();
     pcl::transformPointCloud(*laser_cloud_in, *laser_cloud_offset, transOffset);
     *laser_cloud_in = *laser_cloud_offset;
 
@@ -301,6 +323,7 @@ void lidar_callback(const sensor_msgs::PointCloud2ConstPtr& laser_msg)
         }
     }
 
+    // 加锁是为了防止此时视觉线程正好在读取 depthCloud 提取深度，造成数据冲突
     std::lock_guard<std::mutex> lock(mtx_lidar);
     // 8. fuse global cloud
     depthCloud->clear();
@@ -315,6 +338,8 @@ void lidar_callback(const sensor_msgs::PointCloud2ConstPtr& laser_msg)
     downSizeFilter.filter(*depthCloudDS);
     *depthCloud = *depthCloudDS;
     ROS_INFO("VIS Depth Clouds' Size After Filter = %d", depthCloud->size());
+
+    // lidar_frame --> camera_frame --> world_frame
 }
 
 int main(int argc, char **argv)

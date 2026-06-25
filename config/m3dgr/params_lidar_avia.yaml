@@ -1,0 +1,75 @@
+# project name
+PROJECT_NAME: "lvi_sam_ikdtree"
+
+lvi_sam_ikdtree:
+
+  # Topics
+  pointCloudTopic: "/livox/lidar"             # repub 输出的统一点云话题 (来自 livox_repub avia_repub.launch)
+  imuTopic: "/camera/imu"                     # M3DGR RealSense 6轴 IMU
+
+  # Heading
+  useImuHeadingInitialization: false          # 6轴IMU无磁力计/航向，关闭
+
+  # Export settings
+  savePCD: true
+  savePCDDirectory: "/LVI-SAM/IKD/"
+
+  # Save final trajectory (TUM format: timestamp tx ty tz qx qy qz qw), auto-saved on Ctrl+C
+  saveTrajectory: true
+  saveTrajectoryDirectory: "~/lvi_sam_ikd_traj_avia.txt"
+
+  # Sensor Settings  (Livox Avia)
+  N_SCAN: 6                                   # Avia 等效线数
+  Horizon_SCAN: 6000                          # Livox 非重复扫描，水平分辨率取大值
+  timeField: "time"
+  downsampleRate: 1
+
+  # IMU Settings  (M3DGR camera/imu)
+  imuAccNoise: 1.2374091609523514e-02
+  imuGyrNoise: 3.0032654435730201e-03
+  imuAccBiasN: 1.9218003442176448e-04
+  imuGyrBiasN: 5.4692100664858005e-05
+  imuGravity: 9.79
+
+  # Extrinsics (lidar -> IMU)
+  extrinsicTrans: [-0.19501, 0.0471106, 0.0870882]
+  extrinsicRot: [0.0502661, -0.0116117, 0.998668, -0.99829,  0.0292847, 0.0505876, -0.0298331, -0.999504, -0.0101199]
+  extrinsicRPY: [0.0502661, -0.99829, -0.0298331, -0.0116117, 0.0292847, -0.999504, 0.998668, 0.0505876, -0.0101199]
+
+  # LOAM feature threshold
+  edgeThreshold: 1.0
+  surfThreshold: 0.1
+  edgeFeatureMinValidNum: 10
+  surfFeatureMinValidNum: 100
+
+  # voxel filter paprams
+  odometrySurfLeafSize: 0.4
+  mappingCornerLeafSize: 0.2
+  mappingSurfLeafSize: 0.4
+
+  # robot motion constraint (in case you are using a 2D robot)
+  z_tollerance: 1000
+  rotation_tollerance: 1000
+
+  # CPU Params
+  numberOfCores: 4
+  mappingProcessInterval: 0.15
+
+  # Surrounding map
+  surroundingkeyframeAddingDistThreshold: 1.0
+  surroundingkeyframeAddingAngleThreshold: 0.2
+  surroundingKeyframeDensity: 2.0
+  surroundingKeyframeSearchRadius: 50.0
+
+  # Loop closure
+  loopClosureEnableFlag: true
+  surroundingKeyframeSize: 25
+  historyKeyframeSearchRadius: 15.0
+  historyKeyframeSearchTimeDiff: 30.0
+  historyKeyframeSearchNum: 25
+  historyKeyframeFitnessScore: 0.3
+
+  # Visualization
+  globalMapVisualizationSearchRadius: 1000.0
+  globalMapVisualizationPoseDensity: 10.0
+  globalMapVisualizationLeafSize: 1.0

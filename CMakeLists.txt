@@ -121,18 +121,18 @@ target_link_libraries(${PROJECT_NAME}_visual_loop ${catkin_LIBRARIES} ${PCL_LIBR
 ######################
 
 # IMU Preintegration
-add_executable(${PROJECT_NAME}_imuPreintegration src/lidar_odometry/imuPreintegration.cpp)
+add_executable(${PROJECT_NAME}_imuPreintegration src/lidar_odometry/imuPreintegration.cpp src/lidar_odometry/mahonyMine.cpp)
 target_link_libraries(${PROJECT_NAME}_imuPreintegration ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} gtsam Boost::timer)
 # Range Image Projection
-add_executable(${PROJECT_NAME}_imageProjection src/lidar_odometry/imageProjection.cpp)
+add_executable(${PROJECT_NAME}_imageProjection src/lidar_odometry/imageProjection.cpp src/lidar_odometry/mahonyMine.cpp)
 add_dependencies(${PROJECT_NAME}_imageProjection ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
 target_link_libraries(${PROJECT_NAME}_imageProjection ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 # Feature Association
-add_executable(${PROJECT_NAME}_featureExtraction src/lidar_odometry/featureExtraction.cpp)
+add_executable(${PROJECT_NAME}_featureExtraction src/lidar_odometry/featureExtraction.cpp src/lidar_odometry/mahonyMine.cpp)
 add_dependencies(${PROJECT_NAME}_featureExtraction ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
 target_link_libraries(${PROJECT_NAME}_featureExtraction ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES})
 # Mapping Optimization
-add_executable(${PROJECT_NAME}_mapOptmization src/lidar_odometry/mapOptmization_ikdtree.cpp src/ikdtree/ikd_Tree.cpp)
+add_executable(${PROJECT_NAME}_mapOptmization src/lidar_odometry/mapOptmization_ikdtree.cpp src/ikdtree/ikd_Tree.cpp src/lidar_odometry/mahonyMine.cpp)
 add_dependencies(${PROJECT_NAME}_mapOptmization ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
 target_compile_options(${PROJECT_NAME}_mapOptmization PRIVATE ${OpenMP_CXX_FLAGS})
 target_link_libraries(${PROJECT_NAME}_mapOptmization PRIVATE ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} gtsam Boost::timer)

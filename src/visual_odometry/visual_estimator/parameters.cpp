@@ -27,6 +27,14 @@ double TD, TR;
 int USE_LIDAR;
 int ALIGN_CAMERA_LIDAR_COORDINATE;
 
+// IMU -> LiDAR 外参定义（详见 parameters.h 中的说明）
+double IMU_TO_LIDAR_TX;
+double IMU_TO_LIDAR_TY;
+double IMU_TO_LIDAR_TZ;
+double IMU_TO_LIDAR_ROLL;
+double IMU_TO_LIDAR_PITCH;
+double IMU_TO_LIDAR_YAW;
+
 
 void readParameters(ros::NodeHandle &n)
 {
@@ -45,6 +53,15 @@ void readParameters(ros::NodeHandle &n)
 
     fsSettings["use_lidar"] >> USE_LIDAR;
     fsSettings["align_camera_lidar_estimation"] >> ALIGN_CAMERA_LIDAR_COORDINATE;
+
+    // 读取 IMU->LiDAR 外参（用于 VINS 位姿移交给激光里程计、以及激光里程计初始化回灌 VINS）
+    // 若 yaml 未提供，默认 (平移=0, ry=π)，等价于原版硬编码 q_cam_to_lidar(0,1,0,0)，保证原数据集零回归
+    IMU_TO_LIDAR_TX    = fsSettings["imu_to_lidar_tx"].empty() ? 0.0     : (double)fsSettings["imu_to_lidar_tx"];
+    IMU_TO_LIDAR_TY    = fsSettings["imu_to_lidar_ty"].empty() ? 0.0     : (double)fsSettings["imu_to_lidar_ty"];
+    IMU_TO_LIDAR_TZ    = fsSettings["imu_to_lidar_tz"].empty() ? 0.0     : (double)fsSettings["imu_to_lidar_tz"];
+    IMU_TO_LIDAR_ROLL  = fsSettings["imu_to_lidar_rx"].empty() ? 0.0     : (double)fsSettings["imu_to_lidar_rx"];
+    IMU_TO_LIDAR_PITCH = fsSettings["imu_to_lidar_ry"].empty() ? M_PI    : (double)fsSettings["imu_to_lidar_ry"];
+    IMU_TO_LIDAR_YAW   = fsSettings["imu_to_lidar_rz"].empty() ? 0.0     : (double)fsSettings["imu_to_lidar_rz"];
 
     SOLVER_TIME = fsSettings["max_solver_time"];
     NUM_ITERATIONS = fsSettings["max_num_iterations"];

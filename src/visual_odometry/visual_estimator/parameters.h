@@ -88,6 +88,16 @@ extern double ROW, COL;
 extern int USE_LIDAR;
 extern int ALIGN_CAMERA_LIDAR_COORDINATE;
 
+// ===================== IMU -> LiDAR 外参（可配置，替代原硬编码 q_cam_to_lidar(0,1,0,0)）=====================
+// 含义：把一个点的坐标从 IMU 坐标系变换到 LiDAR 坐标系，即 lidar_T_imu = (旋转 RPY, 平移 XYZ)。
+// 数值约定与 yaml 键 imu_to_lidar_* 一一对应；原数据集填 (平移=0, ry=π) 即可复现原版行为。
+extern double IMU_TO_LIDAR_TX;     // IMU->LiDAR 平移 X（米）
+extern double IMU_TO_LIDAR_TY;     // IMU->LiDAR 平移 Y（米）
+extern double IMU_TO_LIDAR_TZ;     // IMU->LiDAR 平移 Z（米）
+extern double IMU_TO_LIDAR_ROLL;   // IMU->LiDAR 绕 X 轴旋转 roll（弧度）
+extern double IMU_TO_LIDAR_PITCH;  // IMU->LiDAR 绕 Y 轴旋转 pitch（弧度）
+extern double IMU_TO_LIDAR_YAW;    // IMU->LiDAR 绕 Z 轴旋转 yaw（弧度）
+
 void readParameters(ros::NodeHandle &n);
 
 enum SIZE_PARAMETERIZATION

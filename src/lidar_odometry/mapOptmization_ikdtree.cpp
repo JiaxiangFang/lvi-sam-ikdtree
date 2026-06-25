@@ -22,7 +22,7 @@
 
 using namespace gtsam;
 
-std::string log_file_path = "/home/jiax/study/data/time_log_ikdtree.csv";
+std::string log_file_path = "/home/jiax/study/data/M3DGR/time_log_ikdtree.csv";
 
 using symbol_shorthand::X; // Pose3 (x,y,z,r,p,y)
 using symbol_shorthand::V; // Vel   (xdot,ydot,zdot)
@@ -131,6 +131,9 @@ public:
     
     ros::Time timeLaserInfoStamp;
     double timeLaserInfoCur;
+
+    // 局部地图维护(ikd-tree 远端剔除/历史召回/新帧插入)耗时(ms)，由 saveKeyFramesAndFactor 写入
+    double lastMapMaintTime = 0.0;
 
     float transformTobeMapped[6];
 
@@ -241,8 +244,8 @@ public:
         static std::ofstream log_file;
         if (!log_file.is_open()) {
             log_file.open(log_file_path, std::ios::out | std::ios::app);
-            // 写入表头：时间戳, Scan2Map耗时, 总回调耗时
-            log_file << "timestamp,scan2map_time,total_time" << std::endl; 
+            // 写入表头：时间戳, 局部地图维护耗时(L1), Scan2Map匹配耗时(L2), 总回调耗时(L3)
+            log_file << "timestamp,map_maint_time,scan2map_time,total_time" << std::endl; 
         }
         // ROS_INFO("*****************************************");
         auto lhStart = std::chrono::high_resolution_clock::now();
@@ -276,6 +279,8 @@ public:
             std::chrono::duration<double, std::milli> smDuration = smEnd - smStart;
             // ROS_INFO("scan to map cost : %.3f ms", smDuration.count());
 
+            // 局部地图维护耗时(L1)由 saveKeyFramesAndFactor 内部累加写入 lastMapMaintTime
+            lastMapMaintTime = 0.0;
             saveKeyFramesAndFactor();
 
             correctPoses();
@@ -292,8 +297,9 @@ public:
             if (log_file.is_open()) {
                 log_file << std::fixed << std::setprecision(6) 
                         << timeLaserInfoCur << ","            // X轴：时间戳
-                        << smDuration.count() << ","          // Y1：核心优化耗时
-                        << lhDuration.count() << std::endl;   // Y2：当前帧处理总耗时
+                        << lastMapMaintTime << ","            // Y1：局部地图维护耗时(L1)
+                        << smDuration.count() << ","          // Y2：scan-to-map匹配耗时(L2)
+                        << lhDuration.count() << std::endl;   // Y3：当前帧处理总耗时(L3)
             }
         }
     }
@@ -1278,8 +1284,22 @@ public:
         if (cloudKeyPoses3D->points.empty())
             return;
 
-        if (laserCloudCornerLastDSNum > edgeFeatureMinValidNum && laserCloudSurfLastDSNum > surfFeatureMinValidNum)
+        // ===================== 平面特征主导的 scan-to-map 判定 =====================
+        // 原判定要求「边缘特征 > 阈值 且 平面特征 > 阈值」同时满足才优化，否则整帧跳过 scan-to-map，
+        // 位姿退化为纯 IMU/VINS 递推（无激光修正）。
+        // Livox(avia/mid360) 是非重复扫描，按 ring 提取的边缘特征极少（常 0~9 个），
+        // 在道路等场景几乎每帧都达不到边缘阈值 → 每帧都跳过激光匹配 → 航向随陀螺零偏自由漂移。
+        // LMOptimization 内已有完善的退化保护（特征值阈值 + 有效点数<50 守卫），
+        // 因此只要平面特征充足，就能安全地做「平面主导」匹配（边缘特征有多少用多少），
+        // 欠约束方向（如长直走廊的前向）由退化保护置零，交给 IMU/VINS 提供。
+        // 对原 Velodyne 数据集（边缘/平面均充足）走 enoughEdge==true 分支，行为不变、零回归。
+        bool enoughEdge = laserCloudCornerLastDSNum > edgeFeatureMinValidNum;
+        bool enoughSurf = laserCloudSurfLastDSNum > surfFeatureMinValidNum;
+        if (enoughSurf)
         {
+            if (!enoughEdge)
+                ROS_WARN_THROTTLE(5.0, "Few edge features (%d); running planar-dominant scan matching with %d planar features.",
+                                  laserCloudCornerLastDSNum, laserCloudSurfLastDSNum);
             /*auto kdStart = std::chrono::high_resolution_clock::now();
             kdtreeCornerFromMap->setInputCloud(laserCloudCornerFromMapDS);
             kdtreeSurfFromMap->setInputCloud(laserCloudSurfFromMapDS);
@@ -1539,6 +1559,8 @@ public:
         cloudKeyPoses6D->push_back(thisPose6D);
 
         // 新逻辑（生效）：每次新增关键帧后刷新历史位姿KD-Tree，供历史召回和回环后重建复用
+        // ===== L1 局部地图维护计时(段1: 历史位姿树刷新 + 远端剔除 + 历史召回) =====
+        auto mmStart1 = std::chrono::high_resolution_clock::now();
         kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
 
         // SLIDING-WINDOW：维护局部邻域
@@ -1613,6 +1635,8 @@ public:
             *historyKeyFrame = *transformPointCloud(surfCloudKeyFrames[id], &pose);
             ikdtreeSurfFromMap->Add_Points(historyKeyFrame->points, true);
         }
+        auto mmEnd1 = std::chrono::high_resolution_clock::now();
+        lastMapMaintTime += std::chrono::duration<double, std::milli>(mmEnd1 - mmStart1).count();
 
         // cout << "****************************************************" << endl;
         // cout << "Pose covariance:" << endl;
@@ -1639,6 +1663,8 @@ public:
 
         activeKeyFrame->insert(thisPose6D.intensity);                                                   // SLIDING-WINDOW：将当前关键帧id加入活跃集合
         
+        // ===== L1 局部地图维护计时(段2: 当前关键帧点云插入 ikd-tree) =====
+        auto mmStart2 = std::chrono::high_resolution_clock::now();
         pcl::PointCloud<PointType>::Ptr thisCornerKeyFrameGlobal(new pcl::PointCloud<PointType>());     // SLIDING-WINDOW：向ikdtree添加新关键帧点云
         pcl::PointCloud<PointType>::Ptr thisSurfKeyFrameGlobal(new pcl::PointCloud<PointType>());
         // 将当前关键帧点云转换到world
@@ -1662,6 +1688,8 @@ public:
                 ikdtreeSurfFromMap->Add_Points(thisSurfKeyFrameGlobal->points, true);
             }
         }
+        auto mmEnd2 = std::chrono::high_resolution_clock::now();
+        lastMapMaintTime += std::chrono::duration<double, std::milli>(mmEnd2 - mmStart2).count();
 
         // save path for visualization
         updatePath(thisPose6D);
@@ -1794,6 +1822,39 @@ public:
         globalPath.poses.push_back(pose_stamped);
     }
 
+    void saveFinalTrajectory()
+    {
+        if (saveTrajectory == false)
+            return;
+
+        // expand leading '~' to $HOME
+        std::string filePath = saveTrajectoryDirectory;
+        if (!filePath.empty() && filePath[0] == '~')
+            filePath = std::string(std::getenv("HOME")) + filePath.substr(1);
+
+        std::ofstream ofs(filePath.c_str(), std::ios::out | std::ios::trunc);
+        if (!ofs.is_open())
+        {
+            ROS_WARN("Save trajectory failed, cannot open file: %s", filePath.c_str());
+            return;
+        }
+        ofs << std::fixed << std::setprecision(6);
+        // TUM format: timestamp tx ty tz qx qy qz qw
+        for (const auto &p : globalPath.poses)
+        {
+            ofs << p.header.stamp.toSec() << " "
+                << p.pose.position.x << " "
+                << p.pose.position.y << " "
+                << p.pose.position.z << " "
+                << p.pose.orientation.x << " "
+                << p.pose.orientation.y << " "
+                << p.pose.orientation.z << " "
+                << p.pose.orientation.w << "\n";
+        }
+        ofs.close();
+        ROS_INFO("\033[1;32mTrajectory saved (%zu poses) to: %s\033[0m", globalPath.poses.size(), filePath.c_str());
+    }
+
     void publishFrames()
     {
         if (cloudKeyPoses3D->points.empty())
@@ -1847,6 +1908,8 @@ int main(int argc, char** argv)
     std::thread visualizeMapThread(&mapOptimization::visualizeGlobalMapThread, &MO);
 
     ros::spin();
+
+    MO.saveFinalTrajectory();
 
     loopDetectionthread.join();
     visualizeMapThread.join();

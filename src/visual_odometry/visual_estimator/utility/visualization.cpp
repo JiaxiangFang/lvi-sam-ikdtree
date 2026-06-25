@@ -81,15 +81,30 @@ void pubLatestOdometry(const Eigen::Vector3d &P, const Eigen::Quaterniond &Q, co
     // imu odometry in ROS format (change rotation), used for lidar odometry initial guess
     odometry.pose.covariance[0] = double(failureId); // notify lidar odometry failure
 
-    tf::Quaternion q_odom_cam(Q.x(), Q.y(), Q.z(), Q.w());
-    tf::Quaternion q_cam_to_lidar(0, 1, 0, 0); // mark: camera - lidar
-    tf::Quaternion q_odom_ros = q_odom_cam * q_cam_to_lidar;
-    tf::quaternionTFToMsg(q_odom_ros, odometry.pose.pose.orientation);
+    // ===================== 外参驱动的 VINS -> LiDAR 位姿移交 =====================
+    // 原版这里硬编码 q_cam_to_lidar(0,1,0,0)（绕 Y 轴 180°），只适用于原传感器装配。
+    // 现改为由 imu_to_lidar 外参构造，支持 M3DGR 及任意安装方式；原数据集填 (平移=0, ry=π) 即等价。
+    //   world_T_imu ：VINS 估计的 IMU 在 vins_world 下的位姿
+    //   lidar_T_imu ：把点从 IMU 系变换到 LiDAR 系（外参）
+    //   imu_T_lidar ：LiDAR 相对 IMU 的位姿 = lidar_T_imu 的逆
+    //   world_T_lidar：LiDAR 在 vins_world 下的位姿，作为激光去畸变/建图的初值
+    tf::Transform world_T_imu = tf::Transform(
+        tf::Quaternion(Q.x(), Q.y(), Q.z(), Q.w()),
+        tf::Vector3(P.x(), P.y(), P.z()));
+    tf::Transform lidar_T_imu = tf::Transform(
+        tf::createQuaternionFromRPY(IMU_TO_LIDAR_ROLL, IMU_TO_LIDAR_PITCH, IMU_TO_LIDAR_YAW),
+        tf::Vector3(IMU_TO_LIDAR_TX, IMU_TO_LIDAR_TY, IMU_TO_LIDAR_TZ));
+    tf::Transform imu_T_lidar = lidar_T_imu.inverse();
+    tf::Transform world_T_lidar = world_T_imu * imu_T_lidar;
+
+    odometry.pose.pose.position.x = world_T_lidar.getOrigin().x();
+    odometry.pose.pose.position.y = world_T_lidar.getOrigin().y();
+    odometry.pose.pose.position.z = world_T_lidar.getOrigin().z();
+    tf::quaternionTFToMsg(world_T_lidar.getRotation(), odometry.pose.pose.orientation);
     pub_latest_odometry_ros.publish(odometry);
 
     // TF of camera in vins_world in ROS format (change rotation), used for depth registration
-    tf::Transform t_w_body = tf::Transform(q_odom_ros, tf::Vector3(P.x(), P.y(), P.z()));
-    tf::StampedTransform trans_world_vinsbody_ros = tf::StampedTransform(t_w_body, header.stamp, "vins_world", "vins_body_ros");
+    tf::StampedTransform trans_world_vinsbody_ros = tf::StampedTransform(world_T_lidar, header.stamp, "vins_world", "vins_body_ros");
     br.sendTransform(trans_world_vinsbody_ros);
 
     if (ALIGN_CAMERA_LIDAR_COORDINATE)

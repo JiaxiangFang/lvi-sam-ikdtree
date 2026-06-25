@@ -128,7 +128,22 @@ public:
 
         // 0.4 transform cloud from global frame to camera frame
         pcl::PointCloud<PointType>::Ptr depth_cloud_local(new pcl::PointCloud<PointType>());
+        // transNow = vins_world_T_lidar，求逆把世界系点云转回“激光原始轴、原点在相机光心”的局部系
         pcl::transformPointCloud(*depthCloud, *depth_cloud_local, transNow.inverse());
+
+        // ===================== 轴归一化：激光原始轴 -> 相机对齐的标准轴(x前 y左 z上) =====================
+        // depth_cloud_local 当前在“激光原始轴”，而下面的特征射线由相机系换算得到（也是 x 前的右手系）。
+        // M3DGR 的 lidar_to_cam 是 ~90° 旋转，两者并非轴对齐，若不旋转对齐，kd-tree 深度匹配会完全错位。
+        // 这里把激光点旋到与特征射线一致的标准轴，确保后续深度关联正确（仅旋转，平移已在 node 中处理）。
+        Eigen::Affine3f cam_R_lidar_original = pcl::getTransformation(0, 0, 0, L_C_RX, L_C_RY, L_C_RZ); // 仅旋转：lidar->cam
+        Eigen::Matrix4f lidar_normal_R_cam;   // 相机(z前x右y下) -> 标准轴(x前y左z上)
+        lidar_normal_R_cam << 0, 0, 1, 0,
+                             -1, 0, 0, 0,
+                              0, -1, 0, 0,
+                              0, 0, 0, 1;
+        Eigen::Affine3f normal_R_original;
+        normal_R_original = lidar_normal_R_cam * cam_R_lidar_original.matrix(); // 激光原始轴 -> 标准轴
+        pcl::transformPointCloud(*depth_cloud_local, *depth_cloud_local, normal_R_original);
 
         // 0.5 project undistorted normalized (z) 2d features onto a unit sphere
         pcl::PointCloud<PointType>::Ptr features_3d_sphere(new pcl::PointCloud<PointType>());
@@ -259,7 +274,16 @@ public:
         }
 
         // visualize features in cartesian 3d space (including the feature without depth (default 1))
-        publishCloud(&pub_depth_feature, features_3d_sphere, stamp_cur, "vins_body_ros");
+        // 修复: features_3d_sphere 当前位于 lidar_normal(相机朝向 FLU)轴且以相机光心为原点,
+        // 直接以 vins_body_ros(lidar_original)发布会让特征点比激光地图多转一个 normal_R_original(~58°),
+        // 表现为"特征点不指向前方/比地图倾斜". 这里逆旋转回 lidar_original 轴向并补回相机光心偏移 L_C_T,
+        // 使其经 world<-vins_body_ros TF 后与激光地图在 world 中对齐. (纯可视化, 不影响喂给VINS的深度值)
+        Eigen::Affine3f original_T_normal = Eigen::Affine3f::Identity();
+        original_T_normal.linear() = normal_R_original.linear().transpose();
+        original_T_normal.translation() = Eigen::Vector3f((float)L_C_TX, (float)L_C_TY, (float)L_C_TZ);
+        pcl::PointCloud<PointType>::Ptr features_3d_publish(new pcl::PointCloud<PointType>());
+        pcl::transformPointCloud(*features_3d_sphere, *features_3d_publish, original_T_normal);
+        publishCloud(&pub_depth_feature, features_3d_publish, stamp_cur, "vins_body_ros");
         
         // update depth value for return
         for (int i = 0; i < (int)features_3d_sphere->size(); ++i)
