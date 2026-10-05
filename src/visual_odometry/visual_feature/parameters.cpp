@@ -28,6 +28,15 @@ double L_C_RX;
 double L_C_RY;
 double L_C_RZ;
 
+double DEPTH_SPHERE_RESOLUTION_DEG;
+int DEPTH_KNN_K;
+double DEPTH_SIGHT_ANGLE_DEG;
+double DEPTH_CLUSTER_GAP;
+double DEPTH_PCA_SCATTER_THRESH;
+int DEPTH_DEBUG_LOG;
+int DEPTH_USE_ROBUST_FITTING;
+std::string DEPTH_STATS_CSV;
+
 int USE_LIDAR;
 int LIDAR_SKIP;
 
@@ -71,6 +80,49 @@ void readParameters(ros::NodeHandle &n)
     L_C_RX = fsSettings["lidar_to_cam_rx"];
     L_C_RY = fsSettings["lidar_to_cam_ry"];
     L_C_RZ = fsSettings["lidar_to_cam_rz"];
+
+    DEPTH_SPHERE_RESOLUTION_DEG = 0.5;
+    DEPTH_KNN_K = 7;
+    DEPTH_SIGHT_ANGLE_DEG = 2.0;
+    DEPTH_CLUSTER_GAP = 1.0;
+    DEPTH_PCA_SCATTER_THRESH = 0.2;
+    DEPTH_DEBUG_LOG = 0;
+    DEPTH_USE_ROBUST_FITTING = 1;
+    DEPTH_STATS_CSV = "";
+
+    if (!fsSettings["depth_sphere_resolution_deg"].empty())
+        DEPTH_SPHERE_RESOLUTION_DEG = (double)fsSettings["depth_sphere_resolution_deg"];
+    if (!fsSettings["depth_knn_k"].empty())
+        DEPTH_KNN_K = (int)fsSettings["depth_knn_k"];
+    if (!fsSettings["depth_sight_angle_deg"].empty())
+        DEPTH_SIGHT_ANGLE_DEG = (double)fsSettings["depth_sight_angle_deg"];
+    if (!fsSettings["depth_cluster_gap"].empty())
+        DEPTH_CLUSTER_GAP = (double)fsSettings["depth_cluster_gap"];
+    if (!fsSettings["depth_pca_scatter_thresh"].empty())
+        DEPTH_PCA_SCATTER_THRESH = (double)fsSettings["depth_pca_scatter_thresh"];
+    if (!fsSettings["depth_debug_log"].empty())
+        DEPTH_DEBUG_LOG = (int)fsSettings["depth_debug_log"];
+    if (!fsSettings["depth_use_robust_fitting"].empty())
+        DEPTH_USE_ROBUST_FITTING = (int)fsSettings["depth_use_robust_fitting"];
+    if (!fsSettings["depth_stats_csv"].empty())
+        fsSettings["depth_stats_csv"] >> DEPTH_STATS_CSV;
+
+    if (DEPTH_SPHERE_RESOLUTION_DEG <= 0.0)
+    {
+        ROS_WARN("Invalid depth_sphere_resolution_deg (%.3f), fallback to 0.5", DEPTH_SPHERE_RESOLUTION_DEG);
+        DEPTH_SPHERE_RESOLUTION_DEG = 0.5;
+    }
+    if (DEPTH_KNN_K < 3)
+    {
+        ROS_WARN("depth_knn_k (%d) is too small, clamp to 3", DEPTH_KNN_K);
+        DEPTH_KNN_K = 3;
+    }
+    if (DEPTH_SIGHT_ANGLE_DEG <= 0.0)
+        DEPTH_SIGHT_ANGLE_DEG = 2.0;
+    if (DEPTH_CLUSTER_GAP <= 0.0)
+        DEPTH_CLUSTER_GAP = 1.0;
+    if (DEPTH_PCA_SCATTER_THRESH <= 0.0)
+        DEPTH_PCA_SCATTER_THRESH = 0.2;
 
     // fisheye mask
     FISHEYE = fsSettings["fisheye"];

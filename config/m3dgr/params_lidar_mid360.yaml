@@ -16,7 +16,7 @@ lvi_sam_ikdtree:
 
   # Save final trajectory (TUM format: timestamp tx ty tz qx qy qz qw), auto-saved on Ctrl+C
   saveTrajectory: true
-  saveTrajectoryDirectory: "~/lvi_sam_ikd_traj_mid360.txt"
+  saveTrajectoryDirectory: "~/study/data/M3DGR/lvi_sam_ikd_traj_mid360.txt"
 
   # Sensor Settings  (Livox Mid360)
   N_SCAN: 4                                   # Mid360 等效线数
@@ -66,7 +66,7 @@ lvi_sam_ikdtree:
   # Loop closure
   loopClosureEnableFlag: true
   surroundingKeyframeSize: 25
-  historyKeyframeSearchRadius: 15.0
+  historyKeyframeSearchRadius: 4.0 #7.0 #15.0
   historyKeyframeSearchTimeDiff: 30.0
   historyKeyframeSearchNum: 25
   historyKeyframeFitnessScore: 0.3

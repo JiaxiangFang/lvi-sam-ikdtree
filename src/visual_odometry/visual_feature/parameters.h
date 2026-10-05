@@ -94,6 +94,15 @@ extern double L_C_RX;
 extern double L_C_RY;
 extern double L_C_RZ;
 
+extern double DEPTH_SPHERE_RESOLUTION_DEG;
+extern int DEPTH_KNN_K;
+extern double DEPTH_SIGHT_ANGLE_DEG;
+extern double DEPTH_CLUSTER_GAP;
+extern double DEPTH_PCA_SCATTER_THRESH;
+extern int DEPTH_DEBUG_LOG;
+extern int DEPTH_USE_ROBUST_FITTING;
+extern std::string DEPTH_STATS_CSV;
+
 
 void readParameters(ros::NodeHandle &n);
 

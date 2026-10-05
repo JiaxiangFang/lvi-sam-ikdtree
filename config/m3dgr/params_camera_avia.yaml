@@ -85,6 +85,21 @@ show_track: 1           # publish tracking image as topic
 equalize: 1             # if image is too dark or light, trun on equalize to find enough features
 fisheye: 0              # PINHOLE 相机，关闭鱼眼掩膜
 
+# [NEW] 改进二参数: 球面投影分辨率(度/格), 推荐校园室外先用 0.5
+depth_sphere_resolution_deg: 0.5
+# [NEW] 改进二参数: 单位球 KNN 搜索邻居数, 推荐校园室外先用 7
+depth_knn_k: 7
+# [NEW] 改进二参数: 视线夹角阈值(度), 剔除偏离特征视线过大的伪关联点, 推荐 2.0
+depth_sight_angle_deg: 2.0
+# [NEW] 改进二参数: 深度聚类跳变阈值(米), 大于此值判定前景/背景不连续并截断, 推荐 1.0
+depth_cluster_gap: 1.0
+# [NEW] 改进二参数: PCA 散乱度阈值, 散乱度(λ3/λ1)大于此值判定树叶/高噪并放弃深度, 推荐 0.2
+depth_pca_scatter_thresh: 0.2
+# [NEW] 改进二参数: 深度拟合诊断日志开关 (0=关闭, 1=每帧打印覆盖率/各类命中/耗时)
+depth_debug_log: 0
+# [NEW] 改进二消融开关: 1=启用鲁棒几何聚类深度拟合(改进二), 0=退回原始3-NN平面拟合(基线). 仅用于对照实验
+depth_use_robust_fitting: 1
+
 #optimization parameters
 max_solver_time: 0.04   # max solver itration time (ms), to guarantee real time
 max_num_iterations: 10  # max solver itrations, to guarantee real time
