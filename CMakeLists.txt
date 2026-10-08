@@ -136,3 +136,25 @@ add_executable(${PROJECT_NAME}_mapOptmization src/lidar_odometry/mapOptmization_
 add_dependencies(${PROJECT_NAME}_mapOptmization ${catkin_EXPORTED_TARGETS} ${PROJECT_NAME}_generate_messages_cpp)
 target_compile_options(${PROJECT_NAME}_mapOptmization PRIVATE ${OpenMP_CXX_FLAGS})
 target_link_libraries(${PROJECT_NAME}_mapOptmization PRIVATE ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${OpenCV_LIBRARIES} ${OpenMP_CXX_FLAGS} gtsam Boost::timer)
+
+######################
+### Regression tests
+######################
+if(CATKIN_ENABLE_TESTING)
+    add_executable(${PROJECT_NAME}_regression_core tests/regression_core.cpp src/lidar_odometry/mahonyMine.cpp)
+    target_include_directories(${PROJECT_NAME}_regression_core PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    option(LVI_TEST_SANITIZERS "Enable address/undefined sanitizers for dependency-light regression tests" ON)
+    if(LVI_TEST_SANITIZERS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${PROJECT_NAME}_regression_core PRIVATE -O1 -fno-omit-frame-pointer -fsanitize=address,undefined)
+        target_link_libraries(${PROJECT_NAME}_regression_core -fsanitize=address,undefined)
+    endif()
+    foreach(case inverse_sqrt sample_rates imu_guards timestamps rotation_history depth_rejections depth_geometry depth_frame)
+        add_test(NAME ${PROJECT_NAME}_${case} COMMAND ${PROJECT_NAME}_regression_core ${case})
+        set_tests_properties(${PROJECT_NAME}_${case} PROPERTIES TIMEOUT 30)
+    endforeach()
+
+    add_executable(${PROJECT_NAME}_ikdtree_snapshot_test tests/ikdtree_snapshot_test.cpp src/ikdtree/ikd_Tree.cpp)
+    target_link_libraries(${PROJECT_NAME}_ikdtree_snapshot_test ${PCL_LIBRARIES} pthread)
+    add_test(NAME ${PROJECT_NAME}_ikdtree_snapshot COMMAND ${PROJECT_NAME}_ikdtree_snapshot_test)
+    set_tests_properties(${PROJECT_NAME}_ikdtree_snapshot PROPERTIES TIMEOUT 60)
+endif()

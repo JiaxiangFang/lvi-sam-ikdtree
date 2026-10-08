@@ -15,17 +15,24 @@
 // Header files
 
 #include "mahonyMine.h"
-#include <math.h>
+#include "imu_time.h"
+#include <cmath>
 //---------------------------------------------------------------------------------------------------
 // Definitions
 
-#define sampleFreq	1000.0f			// sample frequency in Hz
 #define twoKpDef	(2.0f * 5.0f)	// 2 * proportional gain
 #define twoKiDef	(2.0f * 0.0f)	// 2 * integral gain
 
 //---------------------------------------------------------------------------------------------------
 // Variable definitions
-Mahony::Mahony()
+Mahony::Mahony(float gravity) : expectedGravity(gravity)
+{
+    if (!std::isfinite(expectedGravity) || expectedGravity <= 0.0f)
+        expectedGravity = 9.80511f;
+    reset();
+}
+
+void Mahony::reset()
 {
 	twoKp = twoKpDef;	// 2 * proportional gain (Kp)
 	twoKi = twoKiDef;	// 2 * integral gain (Ki)
@@ -37,12 +44,39 @@ Mahony::Mahony()
 	integralFBy = 0.0f; 
 	integralFBz = 0.0f;
 	initialized = false;
+    initDuration = initAx = initAy = initAz = 0.0f;
 }
 
-// 用首帧加速度(重力方向)直接置四元数, 立即给出正确姿态(roll/pitch from gravity, yaw=0)。
-// 避免从单位四元数(0°)用比例反馈缓慢收敛的启动瞬态; 大倾角雷达(mid360~59°)尤其关键。
-// 水平传感器(avia近水平) a=(0,0,1) => roll=pitch=0 => 单位四元数, 对avia数学恒等零回归。
+bool Mahony::gravityReliable(float ax, float ay, float az) const
+{
+    const double norm = std::sqrt(double(ax) * ax + double(ay) * ay + double(az) * az);
+    return std::isfinite(norm) && std::fabs(norm - expectedGravity) <= 0.15 * expectedGravity;
+}
+
+bool Mahony::initializeIfStationary(float gx, float gy, float gz, float ax, float ay, float az, float dt)
+{
+    // Require a short near-stationary segment instead of treating one arbitrary
+    // acceleration sample as gravity. This cannot detect every external force.
+    const double gyroNorm = std::sqrt(double(gx) * gx + double(gy) * gy + double(gz) * gz);
+    if (!gravityReliable(ax, ay, az) || gyroNorm > 0.35)
+    {
+        initDuration = initAx = initAy = initAz = 0.0f;
+        return false;
+    }
+    initDuration += dt;
+    initAx += ax * dt;
+    initAy += ay * dt;
+    initAz += az * dt;
+    if (initDuration < 0.1f)
+        return false;
+    initOrientationFromAccel(initAx / initDuration, initAy / initDuration, initAz / initDuration);
+    return initialized;
+}
+
+// Roll/pitch from a validated gravity estimate; yaw remains unobservable.
 void Mahony::initOrientationFromAccel(float ax, float ay, float az) {
+	if (!gravityReliable(ax, ay, az))
+		return;
 	float roll  = atan2f(ay, az);
 	float pitch = atan2f(-ax, sqrtf(ay * ay + az * az));
 	float cr = cosf(roll * 0.5f),  sr = sinf(roll * 0.5f);
@@ -52,6 +86,7 @@ void Mahony::initOrientationFromAccel(float ax, float ay, float az) {
 	q2 = cr * sp;
 	q3 = -sr * sp;
 	integralFBx = integralFBy = integralFBz = 0.0f;
+    initialized = true;
 }
 			
 
@@ -61,7 +96,15 @@ void Mahony::initOrientationFromAccel(float ax, float ay, float az) {
 //---------------------------------------------------------------------------------------------------
 // AHRS algorithm update
 
-void Mahony::MahonyAHRSupdate(float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz) {
+void Mahony::MahonyAHRSupdate(float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz, float dt) {
+    if (!imu_safety::validInterval(dt) || !std::isfinite(gx) || !std::isfinite(gy) || !std::isfinite(gz) ||
+        !std::isfinite(ax) || !std::isfinite(ay) || !std::isfinite(az))
+        return;
+    if (!initialized)
+    {
+        initializeIfStationary(gx, gy, gz, ax, ay, az, dt);
+        return;
+    }
     float recipNorm;
     float q0q0, q0q1, q0q2, q0q3, q1q1, q1q2, q1q3, q2q2, q2q3, q3q3;
     float hx, hy, bx, bz;
@@ -70,13 +113,14 @@ void Mahony::MahonyAHRSupdate(float gx, float gy, float gz, float ax, float ay, 
     float qa, qb, qc;
 
     // Use IMU algorithm if magnetometer measurement invalid (avoids NaN in magnetometer normalisation)
-    if((mx == 0.0f) && (my == 0.0f) && (mz == 0.0f)) {
-        MahonyAHRSupdateIMU(gx, gy, gz, ax, ay, az);
+    if (!std::isfinite(mx) || !std::isfinite(my) || !std::isfinite(mz) ||
+        ((mx == 0.0f) && (my == 0.0f) && (mz == 0.0f))) {
+        MahonyAHRSupdateIMU(gx, gy, gz, ax, ay, az, dt);
         return;
     }
 
     // Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
-    if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
+    if(gravityReliable(ax, ay, az)) {
 
         // Normalise accelerometer measurement
         recipNorm = invSqrt(ax * ax + ay * ay + az * az);
@@ -123,9 +167,9 @@ void Mahony::MahonyAHRSupdate(float gx, float gy, float gz, float ax, float ay, 
 
         // Compute and apply integral feedback if enabled
         if(twoKi > 0.0f) {
-            integralFBx += twoKi * halfex * (1.0f / sampleFreq);	// integral error scaled by Ki
-            integralFBy += twoKi * halfey * (1.0f / sampleFreq);
-            integralFBz += twoKi * halfez * (1.0f / sampleFreq);
+            integralFBx += twoKi * halfex * dt;	// integral error scaled by Ki
+            integralFBy += twoKi * halfey * dt;
+            integralFBz += twoKi * halfez * dt;
             gx += integralFBx;	// apply integral feedback
             gy += integralFBy;
             gz += integralFBz;
@@ -143,9 +187,9 @@ void Mahony::MahonyAHRSupdate(float gx, float gy, float gz, float ax, float ay, 
     }
 
     // Integrate rate of change of quaternion
-    gx *= (0.5f * (1.0f / sampleFreq));		// pre-multiply common factors
-    gy *= (0.5f * (1.0f / sampleFreq));
-    gz *= (0.5f * (1.0f / sampleFreq));
+    gx *= (0.5f * dt);		// measured timestamp interval
+    gy *= (0.5f * dt);
+    gz *= (0.5f * dt);
     qa = q0;
     qb = q1;
     qc = q2;
@@ -165,23 +209,23 @@ void Mahony::MahonyAHRSupdate(float gx, float gy, float gz, float ax, float ay, 
 //---------------------------------------------------------------------------------------------------
 // IMU algorithm update
 
-void Mahony::MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float ay, float az) {
+void Mahony::MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float ay, float az, float dt) {
+    if (!imu_safety::validInterval(dt) || !std::isfinite(gx) || !std::isfinite(gy) || !std::isfinite(gz) ||
+        !std::isfinite(ax) || !std::isfinite(ay) || !std::isfinite(az))
+        return;
     float recipNorm;
     float halfvx, halfvy, halfvz;
     float halfex, halfey, halfez;
     float qa, qb, qc;
 
-    // 首帧用重力方向直接初始化姿态, 跳过收敛瞬态(大倾角雷达防止注入错误中间姿态)
+    // Do not publish an uninitialized attitude during motion or missing gravity.
     if (!initialized) {
-        if (!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
-            initOrientationFromAccel(ax, ay, az);
-            initialized = true;
-        }
+        initializeIfStationary(gx, gy, gz, ax, ay, az, dt);
         return;
     }
 
     // Compute feedback only if accelerometer measurement valid (avoids NaN in accelerometer normalisation)
-    if(!((ax == 0.0f) && (ay == 0.0f) && (az == 0.0f))) {
+    if(gravityReliable(ax, ay, az)) {
 
         // Normalise accelerometer measurement
         recipNorm = invSqrt(ax * ax + ay * ay + az * az);
@@ -201,9 +245,9 @@ void Mahony::MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float a
 
         // Compute and apply integral feedback if enabled
         if(twoKi > 0.0f) {
-            integralFBx += twoKi * halfex * (1.0f / sampleFreq);	// integral error scaled by Ki
-            integralFBy += twoKi * halfey * (1.0f / sampleFreq);
-            integralFBz += twoKi * halfez * (1.0f / sampleFreq);
+            integralFBx += twoKi * halfex * dt;	// integral error scaled by Ki
+            integralFBy += twoKi * halfey * dt;
+            integralFBz += twoKi * halfez * dt;
             gx += integralFBx;	// apply integral feedback
             gy += integralFBy;
             gz += integralFBz;
@@ -221,9 +265,9 @@ void Mahony::MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float a
     }
 
     // Integrate rate of change of quaternion
-    gx *= (0.5f * (1.0f / sampleFreq));		// pre-multiply common factors
-    gy *= (0.5f * (1.0f / sampleFreq));
-    gz *= (0.5f * (1.0f / sampleFreq));
+    gx *= (0.5f * dt);		// measured timestamp interval
+    gy *= (0.5f * dt);
+    gz *= (0.5f * dt);
     qa = q0;
     qb = q1;
     qc = q2;
@@ -241,17 +285,11 @@ void Mahony::MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float a
 }
 
 //---------------------------------------------------------------------------------------------------
-// Fast inverse square-root
-// See: http://en.wikipedia.org/wiki/Fast_inverse_square_root
+// Portable inverse square root. Invalid norms are never type-punned or read
+// past the float object (long is 64-bit on LP64 platforms).
 
 float Mahony::invSqrt(float x) {
-    float halfx = 0.5f * x;
-    float y = x;
-    long i = *(long*)&y;
-    i = 0x5f3759df - (i>>1);
-    y = *(float*)&i;
-    y = y * (1.5f - (halfx * y * y));
-    return y;
+    return std::isfinite(x) && x > 0.0f ? 1.0f / std::sqrt(x) : 0.0f;
 }
 
 //====================================================================================================

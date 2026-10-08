@@ -44,6 +44,8 @@
 #include <queue>
 #include <deque>
 #include "mahonyMine.h"   // [M3DGR] 6-axis IMU attitude estimation (Mahony AHRS)
+#include "imu_time.h"
+#include <stdexcept>
 #include <iostream>
 #include <fstream>
 #include <ctime>
@@ -78,6 +80,7 @@ public:
     string gpsTopic;
 
     // GPS Settings
+    bool useGPSFactor;
     bool useImuHeadingInitialization;
     bool useGpsElevation;
     float gpsCovThreshold;
@@ -150,6 +153,8 @@ public:
 
     // [M3DGR] Mahony filter to recover orientation from a 6-axis IMU (no orientation field)
     Mahony filter;
+    imu_safety::TimestampTracker imuClock;
+    bool imuStreamReset = false;
 
     ParamServer()
     {
@@ -162,6 +167,7 @@ public:
         nh.param<std::string>(PROJECT_NAME + "/odomTopic", odomTopic, "odometry/imu");
         nh.param<std::string>(PROJECT_NAME + "/gpsTopic", gpsTopic, "odometry/gps");
 
+        nh.param<bool>(PROJECT_NAME + "/useGPSFactor", useGPSFactor, false);
         nh.param<bool>(PROJECT_NAME + "/useImuHeadingInitialization", useImuHeadingInitialization, false);
         nh.param<bool>(PROJECT_NAME + "/useGpsElevation", useGpsElevation, false);
         nh.param<float>(PROJECT_NAME + "/gpsCovThreshold", gpsCovThreshold, 2.0);
@@ -186,10 +192,17 @@ public:
         nh.param<vector<double>>(PROJECT_NAME+ "/extrinsicRot", extRotV, vector<double>());
         nh.param<vector<double>>(PROJECT_NAME+ "/extrinsicRPY", extRPYV, vector<double>());
         nh.param<vector<double>>(PROJECT_NAME+ "/extrinsicTrans", extTransV, vector<double>());
+        if (extRotV.size() != 9 || extRPYV.size() != 9 || extTransV.size() != 3)
+            throw std::runtime_error("IMU extrinsics require 9 rotation, 9 RPY rotation and 3 translation values");
         extRot = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRotV.data(), 3, 3);
         extRPY = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extRPYV.data(), 3, 3);
         extTrans = Eigen::Map<const Eigen::Matrix<double, -1, -1, Eigen::RowMajor>>(extTransV.data(), 3, 1);
+        if (!extRot.allFinite() || !extRPY.allFinite() || !extTrans.allFinite() ||
+            !std::isfinite(imuGravity) || imuGravity <= 0.0f ||
+            N_SCAN <= 0 || Horizon_SCAN <= 0 || downsampleRate <= 0)
+            throw std::runtime_error("Invalid IMU extrinsics, gravity or scan dimensions");
         extQRPY = Eigen::Quaterniond(extRPY);
+        filter = Mahony(imuGravity);
 
         nh.param<float>(PROJECT_NAME + "/edgeThreshold", edgeThreshold, 0.1);
         nh.param<float>(PROJECT_NAME + "/surfThreshold", surfThreshold, 0.1);
@@ -225,45 +238,69 @@ public:
         usleep(100);
     }
 
-    sensor_msgs::Imu imuConverter(const sensor_msgs::Imu& imu_in)
+    bool imuConverter(const sensor_msgs::Imu& imu_in, sensor_msgs::Imu& imu_out)
     {
-        sensor_msgs::Imu imu_out = imu_in;
-        // rotate acceleration
+        imuStreamReset = false;
         Eigen::Vector3d acc(imu_in.linear_acceleration.x, imu_in.linear_acceleration.y, imu_in.linear_acceleration.z);
+        Eigen::Vector3d gyr(imu_in.angular_velocity.x, imu_in.angular_velocity.y, imu_in.angular_velocity.z);
+        if (!acc.allFinite() || !gyr.allFinite())
+        {
+            ROS_WARN_THROTTLE(1.0, "Dropping non-finite IMU measurement");
+            return false;
+        }
+        double dt = 0.0;
+        const auto timing = imuClock.observe(imu_in.header.stamp.toSec(), dt);
+        if (timing == imu_safety::TimestampTracker::Status::Invalid)
+        {
+            ROS_WARN_THROTTLE(1.0, "Dropping duplicate/out-of-order IMU timestamp");
+            return false;
+        }
+        if (timing == imu_safety::TimestampTracker::Status::Gap)
+        {
+            filter.reset();
+            imuStreamReset = true;
+            ROS_WARN_THROTTLE(1.0, "IMU gap %.3fs: reset attitude/preintegration history", dt);
+        }
+        imu_out = imu_in;
+        // rotate acceleration
         acc = extRot * acc;
         imu_out.linear_acceleration.x = acc.x();
         imu_out.linear_acceleration.y = acc.y();
         imu_out.linear_acceleration.z = acc.z();
         // rotate gyroscope
-        Eigen::Vector3d gyr(imu_in.angular_velocity.x, imu_in.angular_velocity.y, imu_in.angular_velocity.z);
         gyr = extRot * gyr;
         imu_out.angular_velocity.x = gyr.x();
         imu_out.angular_velocity.y = gyr.y();
         imu_out.angular_velocity.z = gyr.z();
-        // rotate roll pitch yaw
-        // [M3DGR] When the IMU has no orientation (6-axis, e.g. RealSense /camera/imu),
-        //         estimate attitude online with a Mahony AHRS filter.
-        filter.MahonyAHRSupdateIMU(imu_out.angular_velocity.x, imu_out.angular_velocity.y, imu_out.angular_velocity.z,
-                                   imu_out.linear_acceleration.x, imu_out.linear_acceleration.y, imu_out.linear_acceleration.z);
-        Eigen::Quaterniond q_mahony(filter.getQuaternionW(), filter.getQuaternionX(), filter.getQuaternionY(), filter.getQuaternionZ());
         Eigen::Quaterniond q_from(imu_in.orientation.w, imu_in.orientation.x, imu_in.orientation.y, imu_in.orientation.z);
         Eigen::Quaterniond q_final;
-        if (q_from.w() == 0.0 && q_from.x() == 0.0 && q_from.y() == 0.0 && q_from.z() == 0.0)
-            q_final = q_mahony;          // 6-axis IMU: use Mahony-estimated orientation
+        const bool missingOrientation = imu_in.orientation_covariance[0] < 0.0 || q_from.squaredNorm() < 1e-12;
+        if (missingOrientation)
+        {
+            if (timing == imu_safety::TimestampTracker::Status::Valid)
+                filter.MahonyAHRSupdateIMU(gyr.x(), gyr.y(), gyr.z(), acc.x(), acc.y(), acc.z(), dt);
+            if (!filter.isInitialized())
+            {
+                ROS_WARN_THROTTLE(5.0, "Waiting for 0.1s near-stationary IMU data (gravity +/-15%%, gyro <0.35rad/s)");
+                return false;
+            }
+            q_final = Eigen::Quaterniond(filter.getQuaternionW(), filter.getQuaternionX(),
+                                         filter.getQuaternionY(), filter.getQuaternionZ());
+        }
         else
-            q_final = q_from * extQRPY;  // 9-axis IMU: original behaviour (unchanged)
+            q_final = q_from.normalized() * extQRPY;
+        if (!acc.allFinite() || !gyr.allFinite() || !q_final.coeffs().allFinite() || q_final.norm() < 0.1)
+        {
+            ROS_WARN_THROTTLE(1.0, "Dropping IMU with invalid transformed values/orientation");
+            return false;
+        }
+        q_final.normalize();
         imu_out.orientation.x = q_final.x();
         imu_out.orientation.y = q_final.y();
         imu_out.orientation.z = q_final.z();
         imu_out.orientation.w = q_final.w();
 
-        if (sqrt(q_final.x()*q_final.x() + q_final.y()*q_final.y() + q_final.z()*q_final.z() + q_final.w()*q_final.w()) < 0.1)
-        {
-            ROS_ERROR("Invalid quaternion, please use a 9-axis IMU!");
-            ros::shutdown();
-        }
-
-        return imu_out;
+        return true;
     }
 };
 

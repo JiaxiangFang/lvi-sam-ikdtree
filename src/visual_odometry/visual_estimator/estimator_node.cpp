@@ -4,6 +4,8 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <atomic>
+#include <cstdint>
 #include <ros/ros.h>
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/opencv.hpp>
@@ -11,6 +13,7 @@
 #include "estimator.h"
 #include "parameters.h"
 #include "utility/visualization.h"
+#include "../../lidar_odometry/imu_time.h"
 
 
 Estimator estimator;
@@ -28,18 +31,35 @@ std::mutex m_buf;
 std::mutex m_state;
 std::mutex m_estimator;
 std::mutex m_odom;
+std::atomic<bool> stop_requested{false};
+std::uint64_t estimator_epoch = 0;  // Reset holds m_estimator + m_buf.
+double synchronization_td = 0.0;    // Protected by m_buf.
 
-double latest_time;
-Eigen::Vector3d tmp_P;
-Eigen::Quaterniond tmp_Q;
-Eigen::Vector3d tmp_V;
-Eigen::Vector3d tmp_Ba;
-Eigen::Vector3d tmp_Bg;
-Eigen::Vector3d acc_0;
-Eigen::Vector3d gyr_0;
+double latest_time = -1.0;
+Eigen::Vector3d tmp_P = Eigen::Vector3d::Zero();
+Eigen::Quaterniond tmp_Q = Eigen::Quaterniond::Identity();
+Eigen::Vector3d tmp_V = Eigen::Vector3d::Zero();
+Eigen::Vector3d tmp_Ba = Eigen::Vector3d::Zero();
+Eigen::Vector3d tmp_Bg = Eigen::Vector3d::Zero();
+Eigen::Vector3d acc_0 = Eigen::Vector3d::Zero();
+Eigen::Vector3d gyr_0 = Eigen::Vector3d::Zero();
 bool init_feature = 0;
 bool init_imu = 1;
-double last_imu_t = 0;
+double last_imu_t = -1;
+// The IMU callback reads a predictor snapshot, never a concurrently optimized Estimator.
+Eigen::Vector3d tmp_gravity = Eigen::Vector3d::Zero();
+bool prediction_ready = false;
+int prediction_failure_count = 0;
+
+void requestStop()
+{
+    {
+        // Synchronize with the wait predicate to avoid a lost shutdown wakeup.
+        std::lock_guard<std::mutex> lock(m_buf);
+        stop_requested.store(true);
+    }
+    con.notify_all();
+}
 
 void predict(const sensor_msgs::ImuConstPtr &imu_msg)
 {
@@ -51,6 +71,8 @@ void predict(const sensor_msgs::ImuConstPtr &imu_msg)
         return;
     }
     double dt = t - latest_time;
+    if (!std::isfinite(dt) || dt <= 0.0)
+        return;
     latest_time = t;
 
     double dx = imu_msg->linear_acceleration.x;
@@ -63,12 +85,12 @@ void predict(const sensor_msgs::ImuConstPtr &imu_msg)
     double rz = imu_msg->angular_velocity.z;
     Eigen::Vector3d angular_velocity{rx, ry, rz};
 
-    Eigen::Vector3d un_acc_0 = tmp_Q * (acc_0 - tmp_Ba) - estimator.g;
+    Eigen::Vector3d un_acc_0 = tmp_Q * (acc_0 - tmp_Ba) - tmp_gravity;
 
     Eigen::Vector3d un_gyr = 0.5 * (gyr_0 + angular_velocity) - tmp_Bg;
     tmp_Q = tmp_Q * Utility::deltaQ(un_gyr * dt);
 
-    Eigen::Vector3d un_acc_1 = tmp_Q * (linear_acceleration - tmp_Ba) - estimator.g;
+    Eigen::Vector3d un_acc_1 = tmp_Q * (linear_acceleration - tmp_Ba) - tmp_gravity;
 
     Eigen::Vector3d un_acc = 0.5 * (un_acc_0 + un_acc_1);
 
@@ -83,6 +105,9 @@ void update()
 {
     TicToc t_predict;
     latest_time = current_time;
+    init_imu = 0;
+    tmp_gravity = estimator.g;
+    prediction_failure_count = estimator.failureCount;
     tmp_P = estimator.Ps[WINDOW_SIZE];
     tmp_Q = estimator.Rs[WINDOW_SIZE];
     tmp_V = estimator.Vs[WINDOW_SIZE];
@@ -106,12 +131,12 @@ getMeasurements()
         if (imu_buf.empty() || feature_buf.empty())
             return measurements;
 
-        if (!(imu_buf.back()->header.stamp.toSec() > feature_buf.front()->header.stamp.toSec() + estimator.td))
+        if (!(imu_buf.back()->header.stamp.toSec() > feature_buf.front()->header.stamp.toSec() + synchronization_td))
         {
             return measurements;
         }
 
-        if (!(imu_buf.front()->header.stamp.toSec() < feature_buf.front()->header.stamp.toSec() + estimator.td))
+        if (!(imu_buf.front()->header.stamp.toSec() < feature_buf.front()->header.stamp.toSec() + synchronization_td))
         {
             ROS_WARN("throw img, only should happen at the beginning");
             feature_buf.pop();
@@ -121,7 +146,7 @@ getMeasurements()
         feature_buf.pop();
 
         std::vector<sensor_msgs::ImuConstPtr> IMUs;
-        while (imu_buf.front()->header.stamp.toSec() < img_msg->header.stamp.toSec() + estimator.td)
+        while (imu_buf.front()->header.stamp.toSec() < img_msg->header.stamp.toSec() + synchronization_td)
         {
             IMUs.emplace_back(imu_buf.front());
             imu_buf.pop();
@@ -134,49 +159,107 @@ getMeasurements()
     return measurements;
 }
 
+void resetEstimator()
+{
+    // Consistent lock order with process(): estimator -> buffers -> predictor.
+    std::lock_guard<std::mutex> estimator_lock(m_estimator);
+    std::lock_guard<std::mutex> buffer_lock(m_buf);
+    std::lock_guard<std::mutex> state_lock(m_state);
+    while (!feature_buf.empty()) feature_buf.pop();
+    while (!imu_buf.empty()) imu_buf.pop();
+    estimator.clearState();
+    estimator.setParameter();
+    synchronization_td = estimator.td;
+    ++estimator_epoch;
+    current_time = -1;
+    last_imu_t = -1;
+    init_feature = 0;
+    init_imu = 1;
+    prediction_ready = false;
+    tmp_Q = Eigen::Quaterniond::Identity();
+    tmp_P.setZero();
+    tmp_V.setZero();
+    {
+        std::lock_guard<std::mutex> odom_lock(m_odom);
+        odomQueue.clear();
+    }
+}
+
 void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
 {
-    if (imu_msg->header.stamp.toSec() <= last_imu_t)
+    const auto& a = imu_msg->linear_acceleration;
+    const auto& w = imu_msg->angular_velocity;
+    if (!std::isfinite(a.x) || !std::isfinite(a.y) || !std::isfinite(a.z) ||
+        !std::isfinite(w.x) || !std::isfinite(w.y) || !std::isfinite(w.z))
     {
-        ROS_WARN("imu message in disorder!");
+        ROS_WARN_THROTTLE(1.0, "Dropping non-finite visual IMU measurement");
         return;
     }
-    last_imu_t = imu_msg->header.stamp.toSec();
-
-    m_buf.lock();
-    imu_buf.push(imu_msg);
-    m_buf.unlock();
-    con.notify_one();
-
-    last_imu_t = imu_msg->header.stamp.toSec();
-
+    const double stamp = imu_msg->header.stamp.toSec();
+    bool gap = false;
     {
-        std::lock_guard<std::mutex> lg(m_state);
-        predict(imu_msg);
-        std_msgs::Header header = imu_msg->header;
-        if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
-            pubLatestOdometry(tmp_P, tmp_Q, tmp_V, header, estimator.failureCount);
+        std::lock_guard<std::mutex> lock(m_buf);
+        if (stop_requested.load()) return;
+        if (stamp <= last_imu_t)
+        {
+            ROS_WARN_THROTTLE(1.0, "imu message in disorder!");
+            return;
+        }
+        gap = last_imu_t >= 0.0 && !imu_safety::validInterval(stamp - last_imu_t);
     }
+    if (gap)
+    {
+        ROS_WARN("IMU gap: reset visual estimator instead of integrating missing data");
+        resetEstimator();
+    }
+    {
+        std::lock_guard<std::mutex> lock(m_buf);
+        if (stop_requested.load()) return;
+        last_imu_t = stamp;
+        imu_buf.push(imu_msg);
+        if (imu_buf.size() > imu_safety::kMaxQueueSize)
+        {
+            imu_buf.pop();
+            ROS_WARN_THROTTLE(5.0, "Visual IMU queue capped; check image input");
+        }
+        // Keep insertion and prediction in one buffer/state critical section:
+        // the worker must not repropagate past this stamp before publication.
+        std::lock_guard<std::mutex> lg(m_state);
+        if (prediction_ready && stamp > latest_time)
+        {
+            predict(imu_msg);
+            pubLatestOdometry(tmp_P, tmp_Q, tmp_V, imu_msg->header, prediction_failure_count);
+        }
+    }
+    con.notify_one();
 }
 
 void odom_callback(const nav_msgs::Odometry::ConstPtr& odom_msg)
 {
     m_odom.lock();
     odomQueue.push_back(*odom_msg);
+    if (odomQueue.size() > imu_safety::kMaxQueueSize)
+        odomQueue.pop_front();
     m_odom.unlock();
 }
 
 void feature_callback(const sensor_msgs::PointCloudConstPtr &feature_msg)
 {
+    if (feature_msg->channels.size() < 6)
+        return;
+    for (std::size_t i = 0; i < 6; ++i)
+        if (feature_msg->channels[i].values.size() != feature_msg->points.size())
+            return;
+    std::lock_guard<std::mutex> lock(m_buf);
+    if (stop_requested.load())
+        return;
     if (!init_feature)
     {
         //skip the first detected feature, which doesn't contain optical flow speed
         init_feature = 1;
         return;
     }
-    m_buf.lock();
     feature_buf.push(feature_msg);
-    m_buf.unlock();
     con.notify_one();
 }
 
@@ -185,18 +268,8 @@ void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
     if (restart_msg->data == true)
     {
         ROS_WARN("restart the estimator!");
-        m_buf.lock();
-        while(!feature_buf.empty())
-            feature_buf.pop();
-        while(!imu_buf.empty())
-            imu_buf.pop();
-        m_buf.unlock();
-        m_estimator.lock();
-        estimator.clearState();
-        estimator.setParameter();
-        m_estimator.unlock();
-        current_time = -1;
-        last_imu_t = 0;
+        resetEstimator();
+        con.notify_all();
     }
     return;
 }
@@ -204,19 +277,26 @@ void restart_callback(const std_msgs::BoolConstPtr &restart_msg)
 // thread: visual-inertial odometry
 void process()
 {
-    while (ros::ok())
+    while (!stop_requested.load())
     {
         std::vector<std::pair<std::vector<sensor_msgs::ImuConstPtr>, sensor_msgs::PointCloudConstPtr>> measurements;
         std::unique_lock<std::mutex> lk(m_buf);
         con.wait(lk, [&]
                  {
-            return (measurements = getMeasurements()).size() != 0;  // 取出两图像间的IMU数据与第二帧图像
+            return stop_requested.load() || !ros::ok() || !(measurements = getMeasurements()).empty();
                  });
+        if (stop_requested.load() || !ros::ok())
+            break;
+        const auto batch_epoch = estimator_epoch;
         lk.unlock();
 
-        m_estimator.lock();
+        std::unique_lock<std::mutex> estimator_lock(m_estimator);
+        if (batch_epoch != estimator_epoch)
+            continue;  // A restart invalidated the batch while the worker waited.
         for (auto &measurement : measurements)
         {
+            if (stop_requested.load())
+                break;
             auto img_msg = measurement.second;
 
             // 1. IMU pre-integration
@@ -305,14 +385,12 @@ void process()
             pubTF(estimator, header);
             pubKeyframe(estimator);
         }
-        m_estimator.unlock();
-
-        m_buf.lock();
-        m_state.lock();
-        if (estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR)
+        std::lock_guard<std::mutex> buffer_lock(m_buf);
+        std::lock_guard<std::mutex> state_lock(m_state);
+        synchronization_td = estimator.td;
+        prediction_ready = estimator.solver_flag == Estimator::SolverFlag::NON_LINEAR;
+        if (prediction_ready)
             update();
-        m_state.unlock();
-        m_buf.unlock();
     }
 }
 
@@ -325,6 +403,7 @@ int main(int argc, char **argv)
 
     readParameters(n);
     estimator.setParameter();
+    synchronization_td = estimator.td;
 
     registerPub(n);
 
@@ -341,6 +420,13 @@ int main(int argc, char **argv)
 
     ros::MultiThreadedSpinner spinner(4);
     spinner.spin();
+
+    // roscpp has no on_shutdown callback API. The spinner returns after ROS
+    // shutdown; wake the measurement worker before joining it here.
+    requestStop();
+    if (measurement_process.joinable())
+        measurement_process.join();
+    delete odomRegister;
 
     return 0;
 }

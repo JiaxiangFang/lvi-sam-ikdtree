@@ -8,6 +8,7 @@ lvi_sam_ikdtree:
   imuTopic: "/camera/imu"                     # M3DGR RealSense 6轴 IMU
 
   # Heading
+  useGPSFactor: false                       # enables both GPS subscription and graph factors
   useImuHeadingInitialization: false          # 6轴IMU无磁力计/航向，关闭
 
   # Export settings
@@ -62,7 +63,7 @@ lvi_sam_ikdtree:
   surroundingKeyframeSearchRadius: 50.0
 
   # Loop closure
-  loopClosureEnableFlag: true
+  loopClosureEnableFlag: true                # master switch: spatial AND visual loop closure
   surroundingKeyframeSize: 25
   historyKeyframeSearchRadius: 15.0
   historyKeyframeSearchTimeDiff: 30.0

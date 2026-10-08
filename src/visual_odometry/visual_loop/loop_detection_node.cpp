@@ -268,6 +268,11 @@ int main(int argc, char **argv)
     fsSettings["project_name"] >> PROJECT_NAME;  
     fsSettings["image_topic"]  >> IMAGE_TOPIC;  
     fsSettings["loop_closure"] >> LOOP_CLOSURE;
+    bool loopClosureMaster = false;
+    n.param<bool>(PROJECT_NAME + "/loopClosureEnableFlag", loopClosureMaster, false);
+    // Lidar YAML is the master switch for BOTH spatial and visual loops.
+    // The camera switch may additionally disable only the visual branch.
+    LOOP_CLOSURE = loopClosureMaster && LOOP_CLOSURE;
     fsSettings["skip_time"]    >> SKIP_TIME;
     fsSettings["skip_dist"]    >> SKIP_DIST;
     fsSettings["debug_image"]  >> DEBUG_IMAGE;
@@ -318,6 +323,9 @@ int main(int argc, char **argv)
     measurement_process = std::thread(process);
 
     ros::spin();
+
+    if (measurement_process.joinable())
+        measurement_process.join();
 
     return 0;
 }

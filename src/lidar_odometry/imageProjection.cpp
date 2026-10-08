@@ -34,8 +34,6 @@ POINT_CLOUD_REGISTER_POINT_STRUCT (PointXYZIRT,
 //     (uint8_t, ring, ring) (uint16_t, noise, noise) (uint32_t, range, range)
 // )
 
-const int queueLength = 500;
-
 class ImageProjection : public ParamServer
 {
 private:
@@ -58,12 +56,8 @@ private:
     std::deque<sensor_msgs::PointCloud2> cloudQueue;
     sensor_msgs::PointCloud2 currentCloudMsg;
     
-    double *imuTime = new double[queueLength];
-    double *imuRotX = new double[queueLength];
-    double *imuRotY = new double[queueLength];
-    double *imuRotZ = new double[queueLength];
-
-    int imuPointerCur;
+    imu_safety::RotationHistory imuRotations;
+    double lastCloudTime = -1.0;
     bool firstPointFlag;
     Eigen::Affine3f transStartInverse;
 
@@ -126,26 +120,30 @@ public:
         // reset range matrix for range image projection
         rangeMat = cv::Mat(N_SCAN, Horizon_SCAN, CV_32F, cv::Scalar::all(FLT_MAX));
 
-        imuPointerCur = 0;
         firstPointFlag = true;
         odomDeskewFlag = false;
-
-        for (int i = 0; i < queueLength; ++i)
-        {
-            imuTime[i] = 0;
-            imuRotX[i] = 0;
-            imuRotY[i] = 0;
-            imuRotZ[i] = 0;
-        }
+        cloudInfo.imuAvailable = false;
+        cloudInfo.odomAvailable = false;
+        imuRotations.clear();
     }
 
     ~ImageProjection(){}
 
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imuMsg)
     {
-        sensor_msgs::Imu thisImu = imuConverter(*imuMsg);
         std::lock_guard<std::mutex> lock1(imuLock);
+        sensor_msgs::Imu thisImu;
+        const bool valid = imuConverter(*imuMsg, thisImu);
+        if (imuStreamReset)
+            imuQueue.clear();
+        if (!valid)
+            return;
         imuQueue.push_back(thisImu);
+        if (imuQueue.size() > imu_safety::kMaxQueueSize)
+        {
+            imuQueue.pop_front();
+            ROS_WARN_THROTTLE(5.0, "Deskew IMU queue capped; check lidar input");
+        }
     }
 
     void odometryHandler(const nav_msgs::Odometry::ConstPtr& odometryMsg)
@@ -160,7 +158,10 @@ public:
             return;
 
         if (!deskewInfo())
+        {
+            resetParameters();
             return;
+        }
 
         projectPointCloud();
 
@@ -173,6 +174,13 @@ public:
 
     bool cachePointCloud(const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg)
     {
+        const double stamp = laserCloudMsg->header.stamp.toSec();
+        if (!std::isfinite(stamp) || stamp <= lastCloudTime)
+        {
+            ROS_WARN_THROTTLE(1.0, "Dropping duplicate/out-of-order lidar timestamp");
+            return false;
+        }
+        lastCloudTime = stamp;
         // cache point cloud
         cloudQueue.push_back(*laserCloudMsg);
 
@@ -186,6 +194,12 @@ public:
             cloudHeader = currentCloudMsg.header;
             timeScanCur = cloudHeader.stamp.toSec();
             timeScanNext = cloudQueue.front().header.stamp.toSec();
+        }
+
+        if (timeScanNext - timeScanCur > 1.0)
+        {
+            ROS_WARN_THROTTLE(1.0, "Dropping scan across a lidar gap greater than 1s");
+            return false;
         }
 
         // convert cloud
@@ -250,6 +264,8 @@ public:
         }
 
         imuDeskewInfo();
+        if (!cloudInfo.imuAvailable)
+            return false;
 
         odomDeskewInfo();
 
@@ -271,7 +287,7 @@ public:
         if (imuQueue.empty())
             return;
 
-        imuPointerCur = 0;
+        imuRotations.clear();
 
         for (int i = 0; i < (int)imuQueue.size(); ++i)
         {
@@ -285,34 +301,19 @@ public:
             if (currentImuTime > timeScanNext + 0.01)
                 break;
 
-            if (imuPointerCur == 0){
-                imuRotX[0] = 0;
-                imuRotY[0] = 0;
-                imuRotZ[0] = 0;
-                imuTime[0] = currentImuTime;
-                ++imuPointerCur;
-                continue;
-            }
-
             // get angular velocity
             double angular_x, angular_y, angular_z;
             imuAngular2rosAngular(&thisImuMsg, &angular_x, &angular_y, &angular_z);
 
-            // integrate rotation
-            double timeDiff = currentImuTime - imuTime[imuPointerCur-1];
-            imuRotX[imuPointerCur] = imuRotX[imuPointerCur-1] + angular_x * timeDiff;
-            imuRotY[imuPointerCur] = imuRotY[imuPointerCur-1] + angular_y * timeDiff;
-            imuRotZ[imuPointerCur] = imuRotZ[imuPointerCur-1] + angular_z * timeDiff;
-            imuTime[imuPointerCur] = currentImuTime;
-            ++imuPointerCur;
+            if (!imuRotations.append(currentImuTime, angular_x, angular_y, angular_z))
+            {
+                ROS_WARN_THROTTLE(1.0, "Dropping scan with invalid/discontinuous IMU coverage");
+                imuRotations.clear();
+                return;
+            }
         }
 
-        --imuPointerCur;
-
-        if (imuPointerCur <= 0)
-            return;
-
-        cloudInfo.imuAvailable = true;
+        cloudInfo.imuAvailable = imuRotations.size() >= 2;
     }
 
     void odomDeskewInfo()
@@ -400,29 +401,7 @@ public:
 
     void findRotation(double pointTime, float *rotXCur, float *rotYCur, float *rotZCur)
     {
-        *rotXCur = 0; *rotYCur = 0; *rotZCur = 0;
-
-        int imuPointerFront = 0;
-        while (imuPointerFront < imuPointerCur)
-        {
-            if (pointTime < imuTime[imuPointerFront])
-                break;
-            ++imuPointerFront;
-        }
-
-        if (pointTime > imuTime[imuPointerFront] || imuPointerFront == 0)
-        {
-            *rotXCur = imuRotX[imuPointerFront];
-            *rotYCur = imuRotY[imuPointerFront];
-            *rotZCur = imuRotZ[imuPointerFront];
-        } else {
-            int imuPointerBack = imuPointerFront - 1;
-            double ratioFront = (pointTime - imuTime[imuPointerBack]) / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
-            double ratioBack = (imuTime[imuPointerFront] - pointTime) / (imuTime[imuPointerFront] - imuTime[imuPointerBack]);
-            *rotXCur = imuRotX[imuPointerFront] * ratioFront + imuRotX[imuPointerBack] * ratioBack;
-            *rotYCur = imuRotY[imuPointerFront] * ratioFront + imuRotY[imuPointerBack] * ratioBack;
-            *rotZCur = imuRotZ[imuPointerFront] * ratioFront + imuRotZ[imuPointerBack] * ratioBack;
-        }
+        imuRotations.interpolate(pointTime, *rotXCur, *rotYCur, *rotZCur);
     }
 
     void findPosition(double relTime, float *posXCur, float *posYCur, float *posZCur)
@@ -477,6 +456,11 @@ public:
         // range image projection
         for (int i = 0; i < cloudSize; ++i)
         {
+            const auto& input = laserCloudIn->points[i];
+            if (!std::isfinite(input.x) || !std::isfinite(input.y) || !std::isfinite(input.z) ||
+                (deskewFlag == 1 && (!std::isfinite(input.time) || input.time < 0.0f ||
+                                     input.time > timeScanNext - timeScanCur + 0.001)))
+                continue;
             PointType thisPoint;
             thisPoint.x = laserCloudIn->points[i].x;
             thisPoint.y = laserCloudIn->points[i].y;

@@ -350,6 +350,20 @@ void KD_TREE<PointType>::run_operation(KD_TREE_NODE ** root, Operation_Logger_Ty
 }
 
 template <typename PointType>
+void KD_TREE<PointType>::Snapshot(PointVector &Storage){
+    // Rebuild takes this mutex before any tree traversal and retains it until
+    // the old nodes have been freed. The mapper supplies its outer state lock.
+    // Do not take working_flag_mutex first: that would invert rebuild's order.
+    struct Lock {
+        pthread_mutex_t *mutex;
+        explicit Lock(pthread_mutex_t *value) : mutex(value) { pthread_mutex_lock(mutex); }
+        ~Lock() { pthread_mutex_unlock(mutex); }
+    } lock(&rebuild_ptr_mutex_lock);
+    Storage.clear();
+    flatten(Root_Node, Storage, NOT_RECORD);
+}
+
+template <typename PointType>
 void KD_TREE<PointType>::Build(PointVector point_cloud){
     if (Root_Node != nullptr){
         delete_tree_nodes(&Root_Node);
@@ -710,53 +724,51 @@ int KD_TREE<PointType>::Delete_by_range(KD_TREE_NODE ** root,  BoxPointType boxp
 }
 
 template <typename PointType>
-void KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE ** root, PointType point, bool allow_rebuild){   
-    if ((*root) == nullptr || (*root)->tree_deleted) return;
+bool KD_TREE<PointType>::Delete_by_point(KD_TREE_NODE ** root, PointType point, bool allow_rebuild){
+    if ((*root) == nullptr || (*root)->tree_deleted) return false;
     (*root)->working_flag = true;
     Push_Down(*root);
     if (same_point((*root)->point, point) && !(*root)->point_deleted) {          
         (*root)->point_deleted = true;
         (*root)->invalid_point_num += 1;
-        if ((*root)->invalid_point_num == (*root)->TreeSize) (*root)->tree_deleted = true;    
-        return;
+        if ((*root)->invalid_point_num == (*root)->TreeSize) (*root)->tree_deleted = true;
+        (*root)->working_flag = false;
+        return true;
     }
     Operation_Logger_Type delete_log;
-    struct timespec Timeout;    
     delete_log.op = DELETE_POINT;
-    delete_log.point = point;     
-    if (((*root)->division_axis == 0 && point.x < (*root)->point.x) || ((*root)->division_axis == 1 && point.y < (*root)->point.y) || ((*root)->division_axis == 2 && point.z < (*root)->point.z)){           
-        if ((Rebuild_Ptr == nullptr) || (*root)->left_son_ptr != *Rebuild_Ptr){          
-            Delete_by_point(&(*root)->left_son_ptr, point, allow_rebuild);         
-        } else {
-            pthread_mutex_lock(&working_flag_mutex);
-            Delete_by_point(&(*root)->left_son_ptr, point,false);
-            if (rebuild_flag){
-                pthread_mutex_lock(&rebuild_logger_mutex_lock);
-                Rebuild_Logger.push(delete_log);
-                pthread_mutex_unlock(&rebuild_logger_mutex_lock);                 
-            }
-            pthread_mutex_unlock(&working_flag_mutex);
+    delete_log.point = point;
+    const auto delete_child = [&](KD_TREE_NODE ** child) {
+        if (Rebuild_Ptr == nullptr || *child != *Rebuild_Ptr)
+            return Delete_by_point(child, point, allow_rebuild);
+        pthread_mutex_lock(&working_flag_mutex);
+        const bool deleted = Delete_by_point(child, point, false);
+        if (deleted && rebuild_flag) {
+            pthread_mutex_lock(&rebuild_logger_mutex_lock);
+            Rebuild_Logger.push(delete_log);
+            pthread_mutex_unlock(&rebuild_logger_mutex_lock);
         }
-    } else {       
-        if ((Rebuild_Ptr == nullptr) || (*root)->right_son_ptr != *Rebuild_Ptr){         
-            Delete_by_point(&(*root)->right_son_ptr, point, allow_rebuild);         
-        } else {
-            pthread_mutex_lock(&working_flag_mutex); 
-            Delete_by_point(&(*root)->right_son_ptr, point, false);
-            if (rebuild_flag){
-                pthread_mutex_lock(&rebuild_logger_mutex_lock);
-                Rebuild_Logger.push(delete_log);
-                pthread_mutex_unlock(&rebuild_logger_mutex_lock);                 
-            }
-            pthread_mutex_unlock(&working_flag_mutex);
-        }        
-    }
+        pthread_mutex_unlock(&working_flag_mutex);
+        return deleted;
+    };
+
+    const int axis = (*root)->division_axis;
+    const float delta = axis == 0 ? point.x - (*root)->point.x :
+                        axis == 1 ? point.y - (*root)->point.y : point.z - (*root)->point.z;
+    KD_TREE_NODE ** first = delta < 0.0f ? &(*root)->left_son_ptr : &(*root)->right_son_ptr;
+    KD_TREE_NODE ** second = delta < 0.0f ? &(*root)->right_son_ptr : &(*root)->left_son_ptr;
+    bool deleted = delete_child(first);
+    // nth_element can place equal split coordinates in either subtree. The
+    // same_point tolerance also overlaps both sides close to the split plane.
+    // Stop after the first match so one request removes only one occurrence.
+    if (!deleted && std::fabs(delta) < EPSS)
+        deleted = delete_child(second);
     Update(*root);
     if (Rebuild_Ptr != nullptr && *Rebuild_Ptr == *root && (*root)->TreeSize < Multi_Thread_Rebuild_Point_Num) Rebuild_Ptr = nullptr; 
     bool need_rebuild = allow_rebuild & Criterion_Check((*root));
     if (need_rebuild) Rebuild(root);
     if ((*root) != nullptr) (*root)->working_flag = false;   
-    return;
+    return deleted;
 }
 
 template <typename PointType>

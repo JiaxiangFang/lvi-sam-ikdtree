@@ -17,6 +17,7 @@
 
 #include "parameters.h"
 #include "tic_toc.h"
+#include "depth_fitting.h"
 
 using namespace std;
 using namespace camodocal;
@@ -157,6 +158,8 @@ public:
         Eigen::Affine3f normal_R_original;
         normal_R_original = lidar_normal_R_cam * cam_R_lidar_original.matrix(); // 激光原始轴 -> 标准轴
         pcl::transformPointCloud(*depth_cloud_local, *depth_cloud_local, normal_R_original);
+        const Eigen::Affine3f original_T_normal = depth_fitting::normalToOriginal(
+            normal_R_original.linear(), Eigen::Vector3f(L_C_TX, L_C_TY, L_C_TZ));
 
         // 0.5 project undistorted normalized (z) 2d features onto a unit sphere
         pcl::PointCloud<PointType>::Ptr features_3d_sphere(new pcl::PointCloud<PointType>());
@@ -181,7 +184,7 @@ public:
         {
             PointType p = depth_cloud_local->points[i];
             // filter points not in camera view
-            if (p.x < 0 || abs(p.y / p.x) > 10 || abs(p.z / p.x) > 10)
+            if (!pcl::isFinite(p) || p.x <= 1e-6f || abs(p.y / p.x) > 10 || abs(p.z / p.x) > 10)
                 continue;
             // find row id in range image
             float row_angle = atan2(p.z, sqrt(p.x * p.x + p.y * p.y)) * 180.0 / M_PI + 90.0; // degrees, bottom -> up, 0 -> 360
@@ -212,7 +215,12 @@ public:
             }
         }
         *depth_cloud_local = *depth_cloud_local_filter2;
-        publishCloud(&pub_depth_cloud, depth_cloud_local, stamp_cur, "vins_body_ros");
+        if (pub_depth_cloud.getNumSubscribers() != 0)
+        {
+            pcl::PointCloud<PointType>::Ptr depth_cloud_publish(new pcl::PointCloud<PointType>());
+            pcl::transformPointCloud(*depth_cloud_local, *depth_cloud_publish, original_T_normal);
+            publishCloud(&pub_depth_cloud, depth_cloud_publish, stamp_cur, "vins_body_ros");
+        }
 
         // 5. project depth cloud onto a unit sphere
         pcl::PointCloud<PointType>::Ptr depth_cloud_unit_sphere(new pcl::PointCloud<PointType>());
@@ -243,7 +251,7 @@ public:
         //   2.2 视线夹角约束: 剔除与特征视线方向偏离过大的伪关联点;
         //   2.3 深度聚类前景筛选: 按深度升序做跳变检测, 仅保留最近的前景点簇;
         //   2.4 PCA 自适应: 按特征值分布区分平面/线性/离散, 分别拟合或放弃深度.
-        // 当严格几何路径失败时, 退化兜底到原始 3-NN 平面拟合, 保证深度覆盖率不低于基线.
+        // 被视线/前景簇/PCA拒绝的点直接无效；仅可信前景上的数值退化允许受限3-NN兜底。
         TicToc t_depth;
         // 诊断计数 (仅在 DEPTH_DEBUG_LOG 开启时有意义)
         int cnt_total = (int)features_3d_sphere->size();
@@ -261,186 +269,35 @@ public:
         vector<float> pointSearchSqDis;
         float dist_sq_threshold = pow(sin(bin_res_deg / 180.0 * M_PI) * 5.0, 2);
         float cos_sight_threshold = cos(DEPTH_SIGHT_ANGLE_DEG / 180.0 * M_PI);
+        const depth_fitting::Options fitting_options{DEPTH_USE_ROBUST_FITTING != 0,
+            dist_sq_threshold, cos_sight_threshold, static_cast<float>(DEPTH_CLUSTER_GAP),
+            static_cast<float>(DEPTH_PCA_SCATTER_THRESH)};
         for (int i = 0; i < (int)features_3d_sphere->size(); ++i)
         {
             int found = kdtree->nearestKSearch(features_3d_sphere->points[i], depth_knn_k,
                                                pointSearchInd, pointSearchSqDis);
-            // 至少需要 3 个近邻, 且最近邻在合理角距范围内 (否则该特征附近没有可靠激光点)
-            if (found < 3 || pointSearchSqDis[0] > dist_sq_threshold)
-            {
-                cnt_no_neighbor++;
-                continue;
-            }
-
-            // 单位视线方向 (特征点投影到单位球后的方向向量)
-            Eigen::Vector3f V(features_3d_sphere->points[i].x,
-                              features_3d_sphere->points[i].y,
-                              features_3d_sphere->points[i].z);
-
-            float s = -1.0f;        // 最终深度 (沿视线方向), <0 表示未求得
-            bool geom_ok = false;   // 严格几何路径是否成功
-
-            // ---------- 2.2 视线夹角约束 ----------
-            // 候选激光点方向也是单位向量, 与 V 的点积即视线夹角余弦; 夹角过大则视为伪关联剔除.
-            // DEPTH_USE_ROBUST_FITTING=0 时跳过整个鲁棒几何路径, 所有特征退回原始 3-NN 平面拟合,
-            // 用于消融实验 (同一二进制内只切换"改进二开/关"这一个变量).
-            vector<pair<float, int>> cand; // (depth=range, index in depth_cloud_unit_sphere)
-            if (DEPTH_USE_ROBUST_FITTING)
-            {
-            cand.reserve(found);
+            std::vector<depth_fitting::Neighbor> neighbors;
+            neighbors.reserve(found);
             for (int j = 0; j < found; ++j)
             {
-                const PointType& q = depth_cloud_unit_sphere->points[pointSearchInd[j]];
-                float cosang = V.x() * q.x + V.y() * q.y + V.z() * q.z;
-                if (cosang < cos_sight_threshold)
-                    continue;
-                cand.push_back(make_pair(q.intensity, pointSearchInd[j]));
+                const auto& point = depth_cloud_unit_sphere->points[pointSearchInd[j]];
+                neighbors.push_back({Eigen::Vector3f(point.x, point.y, point.z), point.intensity, pointSearchSqDis[j]});
             }
-
-            if ((int)cand.size() >= 3)
+            const auto result = depth_fitting::fit(Eigen::Vector3f(features_3d_sphere->points[i].x,
+                features_3d_sphere->points[i].y, features_3d_sphere->points[i].z), std::move(neighbors), fitting_options);
+            switch (result.outcome)
             {
-                // ---------- 2.3 深度聚类前景筛选 ----------
-                // 按深度升序排列后检测深度跳变, 一旦相邻深度差超过阈值即判定空间不连续,
-                // 依据“前景优先”原则截断, 仅保留距相机最近的前景点簇.
-                sort(cand.begin(), cand.end(),
-                     [](const pair<float, int>& a, const pair<float, int>& b){ return a.first < b.first; });
-                int cluster_end = 1;
-                for (; cluster_end < (int)cand.size(); ++cluster_end)
-                {
-                    if (cand[cluster_end].first - cand[cluster_end - 1].first > DEPTH_CLUSTER_GAP)
-                        break;
-                }
-
-                if (cluster_end >= 3)
-                {
-                    // 收集前景簇的 3D 笛卡尔坐标 (单位方向 * range) 并求质心
-                    vector<Eigen::Vector3f> pts;
-                    pts.reserve(cluster_end);
-                    Eigen::Vector3f centroid = Eigen::Vector3f::Zero();
-                    for (int j = 0; j < cluster_end; ++j)
-                    {
-                        const PointType& q = depth_cloud_unit_sphere->points[cand[j].second];
-                        Eigen::Vector3f P(q.x * q.intensity, q.y * q.intensity, q.z * q.intensity);
-                        pts.push_back(P);
-                        centroid += P;
-                    }
-                    centroid /= (float)pts.size();
-                    float min_depth = cand[0].first;
-                    float max_depth = cand[cluster_end - 1].first;
-
-                    // ---------- 2.4 PCA 自适应点云结构感知 ----------
-                    Eigen::Matrix3f cov = Eigen::Matrix3f::Zero();
-                    for (const auto& P : pts)
-                    {
-                        Eigen::Vector3f d = P - centroid;
-                        cov += d * d.transpose();
-                    }
-                    cov /= (float)pts.size();
-                    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3f> es(cov);
-                    Eigen::Vector3f evals = es.eigenvalues();          // 升序: λ3 <= λ2 <= λ1
-                    float l3 = max(evals(0), 0.0f);
-                    float l2 = max(evals(1), 0.0f);
-                    float l1 = max(evals(2), 1e-9f);
-                    float linearity  = (l1 - l2) / l1;                 // 线性度
-                    float planarity  = (l2 - l3) / l1;                 // 平面度
-                    float scattering =  l3 / l1;                       // 散乱度 (三者之和=1)
-
-                    if (scattering > DEPTH_PCA_SCATTER_THRESH ||
-                        (scattering >= planarity && scattering >= linearity))
-                    {
-                        // 离散无序 (树叶 / 高噪区): 放弃 LiDAR 深度, 交由视觉后端三角化
-                        cnt_scatter++;
-                    }
-                    else if (planarity >= linearity)
-                    {
-                        // 平面分布 (墙面 / 地面): 法向为最小特征值方向, 求视线射线与平面交点
-                        Eigen::Vector3f normal = es.eigenvectors().col(0);
-                        float denom = normal.dot(V);
-                        if (fabs(denom) >= 1e-6f)
-                        {
-                            s = normal.dot(centroid) / denom;
-                            if (s > 0.5f)
-                            {
-                                if (s < min_depth) s = min_depth;
-                                if (s > max_depth) s = max_depth;
-                                geom_ok = true;
-                                cnt_plane++;
-                            }
-                        }
-                    }
-                    else
-                    {
-                        // 线性分布 (杆状物 / 树枝): 主方向为最大特征值方向,
-                        // 求视线射线 (过原点, 方向 V) 与空间直线 (过 centroid, 方向 dir) 的公垂线对应深度.
-                        Eigen::Vector3f dir = es.eigenvectors().col(2);
-                        float b = V.dot(dir);
-                        float denom = 1.0f - b * b;                    // a*c - b^2, 其中 a=c=1
-                        if (fabs(denom) >= 1e-6f)                       // 射线与直线非平行
-                        {
-                            float d_ = -V.dot(centroid);
-                            float e_ = -dir.dot(centroid);
-                            s = (b * e_ - d_) / denom;                 // c=1
-                            if (s > 0.5f)
-                            {
-                                if (s < min_depth) s = min_depth;
-                                if (s > max_depth) s = max_depth;
-                                geom_ok = true;
-                                cnt_line++;
-                            }
-                        }
-                    }
-                    if (!geom_ok && s <= 0.5f && scattering <= DEPTH_PCA_SCATTER_THRESH)
-                        cnt_geom_fail++;
-                }
-                else
-                {
-                    cnt_cluster_reject++;
-                }
+                case depth_fitting::Outcome::NoNeighbor: ++cnt_no_neighbor; break;
+                case depth_fitting::Outcome::SightRejected: ++cnt_sight_reject; break;
+                case depth_fitting::Outcome::ClusterRejected: ++cnt_cluster_reject; break;
+                case depth_fitting::Outcome::ScatterRejected: ++cnt_scatter; break;
+                case depth_fitting::Outcome::GeometryRejected: ++cnt_geom_fail; break;
+                case depth_fitting::Outcome::Plane: ++cnt_plane; break;
+                case depth_fitting::Outcome::Line: ++cnt_line; break;
+                case depth_fitting::Outcome::Fallback: ++cnt_fallback; break;
             }
-            else
-            {
-                cnt_sight_reject++;
-            }
-            } // end if (DEPTH_USE_ROBUST_FITTING)
-
-            // ---------- 退化兜底: 原始 3-NN 平面拟合 ----------
-            // 严格几何路径失败 (但不是被判定为离散噪声) 时, 回退到 LVI-SAM 原始策略,
-            // 保证深度覆盖率不低于基线, 避免改进反而丢失大量可用深度.
-            // (消融关闭时所有特征都从这里取深度, 等价于原始算法)
-            if (!geom_ok)
-            {
-                float r1 = depth_cloud_unit_sphere->points[pointSearchInd[0]].intensity;
-                Eigen::Vector3f A(depth_cloud_unit_sphere->points[pointSearchInd[0]].x * r1,
-                                  depth_cloud_unit_sphere->points[pointSearchInd[0]].y * r1,
-                                  depth_cloud_unit_sphere->points[pointSearchInd[0]].z * r1);
-                float r2 = depth_cloud_unit_sphere->points[pointSearchInd[1]].intensity;
-                Eigen::Vector3f B(depth_cloud_unit_sphere->points[pointSearchInd[1]].x * r2,
-                                  depth_cloud_unit_sphere->points[pointSearchInd[1]].y * r2,
-                                  depth_cloud_unit_sphere->points[pointSearchInd[1]].z * r2);
-                float r3 = depth_cloud_unit_sphere->points[pointSearchInd[2]].intensity;
-                Eigen::Vector3f C(depth_cloud_unit_sphere->points[pointSearchInd[2]].x * r3,
-                                  depth_cloud_unit_sphere->points[pointSearchInd[2]].y * r3,
-                                  depth_cloud_unit_sphere->points[pointSearchInd[2]].z * r3);
-
-                Eigen::Vector3f N = (A - B).cross(B - C);
-                float denom = N(0) * V(0) + N(1) * V(1) + N(2) * V(2);
-                if (pointSearchSqDis[2] < dist_sq_threshold && fabs(denom) >= 1e-6f)
-                {
-                    float sf = (N(0) * A(0) + N(1) * A(1) + N(2) * A(2)) / denom;
-                    float min_depth = min(r1, min(r2, r3));
-                    float max_depth = max(r1, max(r2, r3));
-                    if (!(max_depth - min_depth > 2 || sf <= 0.5))
-                    {
-                        if (sf - max_depth > 0) sf = max_depth;
-                        else if (sf - min_depth < 0) sf = min_depth;
-                        s = sf;
-                        geom_ok = true;
-                        cnt_fallback++;
-                    }
-                }
-            }
-
-            if (geom_ok && s > 0.5f)
+            const float s = result.range;
+            if (s > 0.5f)
             {
                 // convert feature into cartesian space if depth is available
                 features_3d_sphere->points[i].x *= s;
@@ -494,9 +351,6 @@ public:
         // 直接以 vins_body_ros(lidar_original)发布会让特征点比激光地图多转一个 normal_R_original(~58°),
         // 表现为"特征点不指向前方/比地图倾斜". 这里逆旋转回 lidar_original 轴向并补回相机光心偏移 L_C_T,
         // 使其经 world<-vins_body_ros TF 后与激光地图在 world 中对齐. (纯可视化, 不影响喂给VINS的深度值)
-        Eigen::Affine3f original_T_normal = Eigen::Affine3f::Identity();
-        original_T_normal.linear() = normal_R_original.linear().transpose();
-        original_T_normal.translation() = Eigen::Vector3f((float)L_C_TX, (float)L_C_TY, (float)L_C_TZ);
         pcl::PointCloud<PointType>::Ptr features_3d_publish(new pcl::PointCloud<PointType>());
         pcl::transformPointCloud(*features_3d_sphere, *features_3d_publish, original_T_normal);
         publishCloud(&pub_depth_feature, features_3d_publish, stamp_cur, "vins_body_ros");

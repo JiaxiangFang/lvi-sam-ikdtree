@@ -1,4 +1,6 @@
 #include "parameters.h"
+#include <algorithm>
+#include <cmath>
 
 std::string IMAGE_TOPIC;
 std::string IMU_TOPIC;
@@ -107,21 +109,22 @@ void readParameters(ros::NodeHandle &n)
     if (!fsSettings["depth_stats_csv"].empty())
         fsSettings["depth_stats_csv"] >> DEPTH_STATS_CSV;
 
-    if (DEPTH_SPHERE_RESOLUTION_DEG <= 0.0)
+    if (!std::isfinite(DEPTH_SPHERE_RESOLUTION_DEG) || DEPTH_SPHERE_RESOLUTION_DEG < 0.1 ||
+        DEPTH_SPHERE_RESOLUTION_DEG > 180.0)
     {
         ROS_WARN("Invalid depth_sphere_resolution_deg (%.3f), fallback to 0.5", DEPTH_SPHERE_RESOLUTION_DEG);
         DEPTH_SPHERE_RESOLUTION_DEG = 0.5;
     }
-    if (DEPTH_KNN_K < 3)
+    if (DEPTH_KNN_K < 3 || DEPTH_KNN_K > 128)
     {
-        ROS_WARN("depth_knn_k (%d) is too small, clamp to 3", DEPTH_KNN_K);
-        DEPTH_KNN_K = 3;
+        ROS_WARN("depth_knn_k (%d) outside [3,128], clamping", DEPTH_KNN_K);
+        DEPTH_KNN_K = std::max(3, std::min(128, DEPTH_KNN_K));
     }
-    if (DEPTH_SIGHT_ANGLE_DEG <= 0.0)
+    if (!std::isfinite(DEPTH_SIGHT_ANGLE_DEG) || DEPTH_SIGHT_ANGLE_DEG <= 0.0 || DEPTH_SIGHT_ANGLE_DEG > 90.0)
         DEPTH_SIGHT_ANGLE_DEG = 2.0;
-    if (DEPTH_CLUSTER_GAP <= 0.0)
+    if (!std::isfinite(DEPTH_CLUSTER_GAP) || DEPTH_CLUSTER_GAP <= 0.0)
         DEPTH_CLUSTER_GAP = 1.0;
-    if (DEPTH_PCA_SCATTER_THRESH <= 0.0)
+    if (!std::isfinite(DEPTH_PCA_SCATTER_THRESH) || DEPTH_PCA_SCATTER_THRESH <= 0.0 || DEPTH_PCA_SCATTER_THRESH > 1.0)
         DEPTH_PCA_SCATTER_THRESH = 0.2;
 
     // fisheye mask

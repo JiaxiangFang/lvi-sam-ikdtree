@@ -4,6 +4,8 @@
 #include "ikd_Tree.h"
 #include <fstream>
 #include <unordered_set>
+#include <condition_variable>
+#include <cstdint>
 
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/geometry/Pose3.h>
@@ -100,10 +102,10 @@ public:
 
     std::vector<PointType> laserCloudOriCornerVec; // corner point holder for parallel computation
     std::vector<PointType> coeffSelCornerVec;
-    std::vector<bool> laserCloudOriCornerFlag;
+    std::vector<uint8_t> laserCloudOriCornerFlag;
     std::vector<PointType> laserCloudOriSurfVec; // surf point holder for parallel computation
     std::vector<PointType> coeffSelSurfVec;
-    std::vector<bool> laserCloudOriSurfFlag;
+    std::vector<uint8_t> laserCloudOriSurfFlag;
 
     pcl::PointCloud<PointType>::Ptr laserCloudCornerFromMap;        // 子图点云
     pcl::PointCloud<PointType>::Ptr laserCloudSurfFromMap;
@@ -126,7 +128,6 @@ public:
 
     pcl::VoxelGrid<PointType> downSizeFilterCorner;
     pcl::VoxelGrid<PointType> downSizeFilterSurf;
-    pcl::VoxelGrid<PointType> downSizeFilterICP;
     pcl::VoxelGrid<PointType> downSizeFilterSurroundingKeyPoses; // for surrounding key poses of scan-to-map optimization
     
     ros::Time timeLaserInfoStamp;
@@ -138,6 +139,47 @@ public:
     float transformTobeMapped[6];
 
     std::mutex mtx;
+    std::mutex backgroundMutex;
+    std::condition_variable backgroundWake;
+    std::deque<std_msgs::Float64MultiArray> visualLoopRequests;
+    bool stopping = false;  // Protected by backgroundMutex.
+    double lastVisualLoopTime = -1.0;
+    double lastLocalMapPublishTime = -1.0;
+    uint64_t poseRevision = 0;  // Protected by mtx; changes after graph correction.
+
+    struct MapSnapshot
+    {
+        pcl::PointCloud<PointType>::Ptr poses3D{new pcl::PointCloud<PointType>()};
+        pcl::PointCloud<PointTypePose>::Ptr poses6D{new pcl::PointCloud<PointTypePose>()};
+        vector<pcl::PointCloud<PointType>::Ptr> corners;
+        vector<pcl::PointCloud<PointType>::Ptr> surfaces;
+        ros::Time stamp;
+        uint64_t revision = 0;
+    };
+
+    MapSnapshot snapshotMap()
+    {
+        MapSnapshot snapshot;
+        std::lock_guard<std::mutex> lock(mtx);
+        *snapshot.poses3D = *cloudKeyPoses3D;
+        *snapshot.poses6D = *cloudKeyPoses6D;
+        // Keyframe clouds are immutable after insertion; copy shared ownership,
+        // not container references. Poses must be copied because loops edit them.
+        snapshot.corners = cornerCloudKeyFrames;
+        snapshot.surfaces = surfCloudKeyFrames;
+        snapshot.stamp = timeLaserInfoStamp;
+        snapshot.revision = poseRevision;
+        return snapshot;
+    }
+
+    void stopBackgroundThreads()
+    {
+        {
+            std::lock_guard<std::mutex> lock(backgroundMutex);
+            stopping = true;
+        }
+        backgroundWake.notify_all();
+    }
 
     bool isDegenerate = false;
     cv::Mat matP;
@@ -170,8 +212,10 @@ public:
         pubPath               = nh.advertise<nav_msgs::Path>          (PROJECT_NAME + "/lidar/mapping/path", 1);
 
         subLaserCloudInfo     = nh.subscribe<lvi_sam_ikdtree::cloud_info>     (PROJECT_NAME + "/lidar/feature/cloud_info", 5, &mapOptimization::laserCloudInfoHandler, this, ros::TransportHints().tcpNoDelay());
-        subGPS                = nh.subscribe<nav_msgs::Odometry>      (gpsTopic,                                   50, &mapOptimization::gpsHandler, this, ros::TransportHints().tcpNoDelay());
-        subLoopInfo           = nh.subscribe<std_msgs::Float64MultiArray>(PROJECT_NAME + "/vins/loop/match_frame", 5, &mapOptimization::loopHandler, this, ros::TransportHints().tcpNoDelay());
+        if (useGPSFactor)
+            subGPS = nh.subscribe<nav_msgs::Odometry>(gpsTopic, 50, &mapOptimization::gpsHandler, this, ros::TransportHints().tcpNoDelay());
+        if (loopClosureEnableFlag)
+            subLoopInfo = nh.subscribe<std_msgs::Float64MultiArray>(PROJECT_NAME + "/vins/loop/match_frame", 5, &mapOptimization::loopHandler, this, ros::TransportHints().tcpNoDelay());
 
         pubHistoryKeyFrames   = nh.advertise<sensor_msgs::PointCloud2>(PROJECT_NAME + "/lidar/mapping/loop_closure_history_cloud", 1);
         pubIcpKeyFrames       = nh.advertise<sensor_msgs::PointCloud2>(PROJECT_NAME + "/lidar/mapping/loop_closure_corrected_cloud", 1);
@@ -183,7 +227,6 @@ public:
 
         downSizeFilterCorner.setLeafSize(mappingCornerLeafSize, mappingCornerLeafSize, mappingCornerLeafSize);
         downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
-        downSizeFilterICP.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
         downSizeFilterSurroundingKeyPoses.setLeafSize(surroundingKeyframeDensity, surroundingKeyframeDensity, surroundingKeyframeDensity); // for surrounding key poses of scan-to-map optimization
 
         allocateMemory();
@@ -249,6 +292,7 @@ public:
         }
         // ROS_INFO("*****************************************");
         auto lhStart = std::chrono::high_resolution_clock::now();
+        std::lock_guard<std::mutex> lock(mtx);
 
         // extract time stamp
         timeLaserInfoStamp = msgIn->header.stamp;
@@ -258,8 +302,6 @@ public:
         cloudInfo = *msgIn;
         pcl::fromROSMsg(msgIn->cloud_corner,  *laserCloudCornerLast);
         pcl::fromROSMsg(msgIn->cloud_surface, *laserCloudSurfLast);
-
-        std::lock_guard<std::mutex> lock(mtx);
 
         static double timeLastProcessing = -1;
         if (timeLaserInfoCur - timeLastProcessing >= mappingProcessInterval) {
@@ -306,8 +348,15 @@ public:
 
     void gpsHandler(const nav_msgs::Odometry::ConstPtr& gpsMsg)
     {
+        if (!useGPSFactor)
+            return;
         std::lock_guard<std::mutex> lock(mtx);
         gpsQueue.push_back(*gpsMsg);
+        if (gpsQueue.size() > 1000)
+        {
+            gpsQueue.pop_front();
+            ROS_WARN_THROTTLE(5.0, "GPS queue capped: no recent usable GPS factor");
+        }
     }
 
     void pointAssociateToMap(PointType const * const pi, PointType * const po)
@@ -384,12 +433,21 @@ public:
 
     void visualizeGlobalMapThread()
     {
-        ros::Rate rate(0.2);
-        while (ros::ok()){
-            rate.sleep();
+        while (ros::ok())
+        {
+            std::unique_lock<std::mutex> lock(backgroundMutex);
+            if (backgroundWake.wait_for(lock, std::chrono::seconds(5), [this] { return stopping; }))
+                break;
+            lock.unlock();
+            if (!ros::ok())
+                break;
             publishGlobalMap();
         }
+    }
 
+    // Called only after ROS callbacks and both background workers have stopped.
+    void saveMap()
+    {
         if (savePCD == false)
             return;
 
@@ -453,7 +511,8 @@ public:
         if (pubLaserCloudSurround.getNumSubscribers() == 0)
             return;
 
-        if (cloudKeyPoses3D->points.empty() == true)
+        const MapSnapshot snapshot = snapshotMap();
+        if (snapshot.poses3D->points.empty())
             return;
 
         pcl::KdTreeFLANN<PointType>::Ptr kdtreeGlobalMap(new pcl::KdTreeFLANN<PointType>());;
@@ -466,13 +525,11 @@ public:
         std::vector<int> pointSearchIndGlobalMap;
         std::vector<float> pointSearchSqDisGlobalMap;
         // search near key frames to visualize
-        mtx.lock();
-        kdtreeGlobalMap->setInputCloud(cloudKeyPoses3D);
-        kdtreeGlobalMap->radiusSearch(cloudKeyPoses3D->back(), globalMapVisualizationSearchRadius, pointSearchIndGlobalMap, pointSearchSqDisGlobalMap, 0);
-        mtx.unlock();
+        kdtreeGlobalMap->setInputCloud(snapshot.poses3D);
+        kdtreeGlobalMap->radiusSearch(snapshot.poses3D->back(), globalMapVisualizationSearchRadius, pointSearchIndGlobalMap, pointSearchSqDisGlobalMap, 0);
 
         for (int i = 0; i < (int)pointSearchIndGlobalMap.size(); ++i)
-            globalMapKeyPoses->push_back(cloudKeyPoses3D->points[pointSearchIndGlobalMap[i]]);
+            globalMapKeyPoses->push_back(snapshot.poses3D->points[pointSearchIndGlobalMap[i]]);
         // downsample near selected key frames
         pcl::VoxelGrid<PointType> downSizeFilterGlobalMapKeyPoses; // for global map visualization
         downSizeFilterGlobalMapKeyPoses.setLeafSize(globalMapVisualizationPoseDensity, globalMapVisualizationPoseDensity, globalMapVisualizationPoseDensity); // for global map visualization
@@ -481,42 +538,48 @@ public:
 
         // extract visualized and downsampled key frames
         for (int i = 0; i < (int)globalMapKeyPosesDS->size(); ++i){
-            if (pointDistance(globalMapKeyPosesDS->points[i], cloudKeyPoses3D->back()) > globalMapVisualizationSearchRadius)
+            if (pointDistance(globalMapKeyPosesDS->points[i], snapshot.poses3D->back()) > globalMapVisualizationSearchRadius)
                 continue;
             int thisKeyInd = (int)globalMapKeyPosesDS->points[i].intensity;
-            *globalMapKeyFrames += *transformPointCloud(cornerCloudKeyFrames[thisKeyInd],  &cloudKeyPoses6D->points[thisKeyInd]);
-            *globalMapKeyFrames += *transformPointCloud(surfCloudKeyFrames[thisKeyInd],    &cloudKeyPoses6D->points[thisKeyInd]);
+            if (thisKeyInd < 0 || thisKeyInd >= static_cast<int>(snapshot.corners.size()))
+                continue;
+            *globalMapKeyFrames += *transformPointCloud(snapshot.corners[thisKeyInd],  &snapshot.poses6D->points[thisKeyInd]);
+            *globalMapKeyFrames += *transformPointCloud(snapshot.surfaces[thisKeyInd], &snapshot.poses6D->points[thisKeyInd]);
         }
         // downsample visualized points
         pcl::VoxelGrid<PointType> downSizeFilterGlobalMapKeyFrames; // for global map visualization
         downSizeFilterGlobalMapKeyFrames.setLeafSize(globalMapVisualizationLeafSize, globalMapVisualizationLeafSize, globalMapVisualizationLeafSize); // for global map visualization
         downSizeFilterGlobalMapKeyFrames.setInputCloud(globalMapKeyFrames);
         downSizeFilterGlobalMapKeyFrames.filter(*globalMapKeyFramesDS);
-        publishCloud(&pubLaserCloudSurround, globalMapKeyFramesDS, timeLaserInfoStamp, "odom");    
+        publishCloud(&pubLaserCloudSurround, globalMapKeyFramesDS, snapshot.stamp, "odom");
     }
 
     void loopHandler(const std_msgs::Float64MultiArray::ConstPtr& loopMsg)
     {
-        // control loop closure frequency
-        static double last_loop_closure_time = -1;
+        if (!loopClosureEnableFlag || loopMsg->data.size() != 2 ||
+            !std::isfinite(loopMsg->data[0]) || !std::isfinite(loopMsg->data[1]))
+            return;
         {
-            // std::lock_guard<std::mutex> lock(mtx);
-            if (timeLaserInfoCur - last_loop_closure_time < 5.0)
+            std::lock_guard<std::mutex> lock(backgroundMutex);
+            if (stopping)
                 return;
-            else
-                last_loop_closure_time = timeLaserInfoCur;
+            const double stamp = loopMsg->data[0];
+            if (lastVisualLoopTime >= 0.0 && stamp >= lastVisualLoopTime && stamp - lastVisualLoopTime < 5.0)
+                return;
+            lastVisualLoopTime = stamp;
+            if (visualLoopRequests.size() >= 5)
+                visualLoopRequests.pop_front();
+            visualLoopRequests.push_back(*loopMsg);
         }
-
-        performLoopClosure(*loopMsg);
+        // ICP and loopIndexContainer have exactly one consumer, never the ROS callback.
+        backgroundWake.notify_all();
     }
 
-    void performLoopClosure(const std_msgs::Float64MultiArray& loopMsg)
+    void performLoopClosure(const std_msgs::Float64MultiArray& loopMsg, const MapSnapshot& snapshot)
     {
-        pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D(new pcl::PointCloud<PointTypePose>());
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            *copy_cloudKeyPoses6D = *cloudKeyPoses6D;
-        }
+        if (!loopClosureEnableFlag || snapshot.poses6D->empty())
+            return;
+        const auto& copy_cloudKeyPoses6D = snapshot.poses6D;
 
         // get lidar keyframe id
         int key_cur = -1; // latest lidar keyframe id
@@ -539,12 +602,12 @@ public:
         pcl::PointCloud<PointType>::Ptr cureKeyframeCloud(new pcl::PointCloud<PointType>());
         pcl::PointCloud<PointType>::Ptr prevKeyframeCloud(new pcl::PointCloud<PointType>());
         {
-            loopFindNearKeyframes(copy_cloudKeyPoses6D, cureKeyframeCloud, key_cur, 0);
-            loopFindNearKeyframes(copy_cloudKeyPoses6D, prevKeyframeCloud, key_pre, historyKeyframeSearchNum);
+            loopFindNearKeyframes(snapshot, cureKeyframeCloud, key_cur, 0);
+            loopFindNearKeyframes(snapshot, prevKeyframeCloud, key_pre, historyKeyframeSearchNum);
             if (cureKeyframeCloud->size() < 300 || prevKeyframeCloud->size() < 1000)
                 return;
             if (pubHistoryKeyFrames.getNumSubscribers() != 0)
-                publishCloud(&pubHistoryKeyFrames, prevKeyframeCloud, timeLaserInfoStamp, "odom");
+                publishCloud(&pubHistoryKeyFrames, prevKeyframeCloud, snapshot.stamp, "odom");
         }
 
         // get keyframe pose
@@ -587,7 +650,7 @@ public:
         {
             pcl::PointCloud<PointType>::Ptr closed_cloud(new pcl::PointCloud<PointType>());
             pcl::transformPointCloud(*cureKeyframeCloud_new, *closed_cloud, icp.getFinalTransformation());
-            publishCloud(&pubIcpKeyFrames, closed_cloud, timeLaserInfoStamp, "odom");
+            publishCloud(&pubIcpKeyFrames, closed_cloud, snapshot.stamp, "odom");
         }
 
         // add graph factor
@@ -602,11 +665,15 @@ public:
             Vector6 << noise, noise, noise, noise, noise, noise;
             noiseModel::Diagonal::shared_ptr constraintNoise = noiseModel::Diagonal::Variances(Vector6);
             // save pose constraint
-            mtx.lock();
-            loopIndexQueue.push_back(make_pair(key_cur, key_pre));
-            loopPoseQueue.push_back(poseFrom.between(poseTo));
-            loopNoiseQueue.push_back(constraintNoise);
-            mtx.unlock();
+            {
+                std::lock_guard<std::mutex> lock(mtx);
+                // A different graph correction may have happened during ICP.
+                if (snapshot.revision != poseRevision)
+                    return;
+                loopIndexQueue.push_back(make_pair(key_cur, key_pre));
+                loopPoseQueue.push_back(poseFrom.between(poseTo));
+                loopNoiseQueue.push_back(constraintNoise);
+            }
             // add loop pair to container
             loopIndexContainer[key_cur] = key_pre;
         }
@@ -618,7 +685,7 @@ public:
             // loop nodes
             visualization_msgs::Marker markerNode;
             markerNode.header.frame_id = "odom";
-            markerNode.header.stamp = timeLaserInfoStamp;
+            markerNode.header.stamp = snapshot.stamp;
             markerNode.action = visualization_msgs::Marker::ADD;
             markerNode.type = visualization_msgs::Marker::SPHERE_LIST;
             markerNode.ns = "loop_nodes";
@@ -630,7 +697,7 @@ public:
             // loop edges
             visualization_msgs::Marker markerEdge;
             markerEdge.header.frame_id = "odom";
-            markerEdge.header.stamp = timeLaserInfoStamp;
+            markerEdge.header.stamp = snapshot.stamp;
             markerEdge.action = visualization_msgs::Marker::ADD;
             markerEdge.type = visualization_msgs::Marker::LINE_LIST;
             markerEdge.ns = "loop_edges";
@@ -663,20 +730,20 @@ public:
         }
     }
 
-    void loopFindNearKeyframes(const pcl::PointCloud<PointTypePose>::Ptr& copy_cloudKeyPoses6D,
+    void loopFindNearKeyframes(const MapSnapshot& snapshot,
                                pcl::PointCloud<PointType>::Ptr& nearKeyframes, 
                                const int& key, const int& searchNum)
     {
         // extract near keyframes
         nearKeyframes->clear();
-        int cloudSize = copy_cloudKeyPoses6D->size();
+        int cloudSize = snapshot.poses6D->size();
         for (int i = -searchNum; i <= searchNum; ++i)
         {
             int key_near = key + i;
             if (key_near < 0 || key_near >= cloudSize )
                 continue;
-            *nearKeyframes += *transformPointCloud(cornerCloudKeyFrames[key_near], &copy_cloudKeyPoses6D->points[key_near]);
-            *nearKeyframes += *transformPointCloud(surfCloudKeyFrames[key_near],   &copy_cloudKeyPoses6D->points[key_near]);
+            *nearKeyframes += *transformPointCloud(snapshot.corners[key_near],  &snapshot.poses6D->points[key_near]);
+            *nearKeyframes += *transformPointCloud(snapshot.surfaces[key_near], &snapshot.poses6D->points[key_near]);
         }
 
         if (nearKeyframes->empty())
@@ -684,6 +751,8 @@ public:
 
         // downsample near keyframes
         pcl::PointCloud<PointType>::Ptr cloud_temp(new pcl::PointCloud<PointType>());
+        pcl::VoxelGrid<PointType> downSizeFilterICP;
+        downSizeFilterICP.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
         downSizeFilterICP.setInputCloud(nearKeyframes);
         downSizeFilterICP.filter(*cloud_temp);
         *nearKeyframes = *cloud_temp;
@@ -732,16 +801,39 @@ public:
         if (loopClosureEnableFlag == false)
             return;
 
-        ros::Rate rate(0.5);
+        auto nextSpatialSearch = std::chrono::steady_clock::now();
         while (ros::ok())
         {
-            rate.sleep();
-            performLoopClosureDetection();
+            std::deque<std_msgs::Float64MultiArray> requests;
+            {
+                std::unique_lock<std::mutex> lock(backgroundMutex);
+                backgroundWake.wait_until(lock, nextSpatialSearch,
+                    [this] { return stopping || !visualLoopRequests.empty(); });
+                if (stopping || !ros::ok())
+                    break;
+                requests.swap(visualLoopRequests);
+            }
+            for (const auto& request : requests)
+            {
+                if (!ros::ok())
+                    break;
+                performLoopClosure(request, snapshotMap());
+            }
+            if (ros::ok() && std::chrono::steady_clock::now() >= nextSpatialSearch)
+            {
+                performLoopClosureDetection();
+                nextSpatialSearch = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            }
         }
     }
 
     void performLoopClosureDetection()
     {
+        if (!loopClosureEnableFlag)
+            return;
+        const MapSnapshot snapshot = snapshotMap();
+        if (snapshot.poses3D->empty())
+            return;
         std::vector<int> pointSearchIndLoop;
         std::vector<float> pointSearchSqDisLoop;
 
@@ -751,29 +843,23 @@ public:
         double loop_time_cur = -1;
         double loop_time_pre = -1;
 
-        // find latest key and time
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-
-            if (cloudKeyPoses3D->empty())
-                return;
-            
-            kdtreeHistoryKeyPoses->setInputCloud(cloudKeyPoses3D);
-            kdtreeHistoryKeyPoses->radiusSearch(cloudKeyPoses3D->back(), historyKeyframeSearchRadius, pointSearchIndLoop, pointSearchSqDisLoop, 0);
-
-            key_cur = cloudKeyPoses3D->size() - 1;
-            loop_time_cur = cloudKeyPoses6D->points[key_cur].time;
-        }
+        // Work entirely on one revision, not live containers modified by mapping.
+        pcl::KdTreeFLANN<PointType> historySearch;
+        historySearch.setInputCloud(snapshot.poses3D);
+        historySearch.radiusSearch(snapshot.poses3D->back(), historyKeyframeSearchRadius,
+                                  pointSearchIndLoop, pointSearchSqDisLoop, 0);
+        key_cur = snapshot.poses3D->size() - 1;
+        loop_time_cur = snapshot.poses6D->points[key_cur].time;
 
         // find previous key and time
         {
             for (int i = 0; i < (int)pointSearchIndLoop.size(); ++i)
             {
                 int id = pointSearchIndLoop[i];
-                if (abs(cloudKeyPoses6D->points[id].time - loop_time_cur) > historyKeyframeSearchTimeDiff)
+                if (abs(snapshot.poses6D->points[id].time - loop_time_cur) > historyKeyframeSearchTimeDiff)
                 {
                     key_pre = id;
-                    loop_time_pre = cloudKeyPoses6D->points[key_pre].time;
+                    loop_time_pre = snapshot.poses6D->points[key_pre].time;
                     break;
                 }
             }
@@ -786,7 +872,7 @@ public:
         std_msgs::Float64MultiArray match_msg;
         match_msg.data.push_back(loop_time_cur);
         match_msg.data.push_back(loop_time_pre);
-        performLoopClosure(match_msg);
+        performLoopClosure(match_msg, snapshot);
     }
 
     void updateInitialGuess()
@@ -1520,7 +1606,8 @@ public:
         addOdomFactor();
 
         // gps factor
-        // addGPSFactor();
+        if (useGPSFactor)
+            addGPSFactor();
 
         // loop factor
         addLoopFactor();
@@ -1779,6 +1866,7 @@ public:
                 ikdtreeSurfFromMap->Build(rebuildSurfCloud->points);
 
             aLoopIsClosed = false;
+            ++poseRevision;
             // ID for reseting IMU pre-integration
             ++imuPreintegrationResetId;
         }
@@ -1861,8 +1949,24 @@ public:
             return;
         // publish key poses
         publishCloud(&pubKeyPoses, cloudKeyPoses6D, timeLaserInfoStamp, "odom");
-        // Publish surrounding key frames
-        publishCloud(&pubRecentKeyFrames, laserCloudSurfFromMapDS, timeLaserInfoStamp, "odom");
+        // Export actual valid ikd-tree points, not the retired PCL map buffer.
+        // This callback already holds mtx; Snapshot also waits for internal
+        // tree rebuilding. Throttle the full cloud copy to at most 1 Hz.
+        if (pubRecentKeyFrames.getNumSubscribers() != 0 &&
+            (lastLocalMapPublishTime < 0.0 || timeLaserInfoCur - lastLocalMapPublishTime >= 1.0))
+        {
+            KD_TREE<PointType>::PointVector cornerPoints, surfPoints;
+            ikdtreeCornerFromMap->Snapshot(cornerPoints);
+            ikdtreeSurfFromMap->Snapshot(surfPoints);
+            pcl::PointCloud<PointType>::Ptr localMap(new pcl::PointCloud<PointType>());
+            localMap->points = std::move(cornerPoints);
+            localMap->points.insert(localMap->points.end(), surfPoints.begin(), surfPoints.end());
+            localMap->width = localMap->points.size();
+            localMap->height = 1;
+            localMap->is_dense = true;
+            publishCloud(&pubRecentKeyFrames, localMap, timeLaserInfoStamp, "odom");
+            lastLocalMapPublishTime = timeLaserInfoCur;
+        }
         // publish registered key frame
         if (pubRecentKeyFrame.getNumSubscribers() != 0)
         {
@@ -1909,10 +2013,12 @@ int main(int argc, char** argv)
 
     ros::spin();
 
-    MO.saveFinalTrajectory();
-
+    // Wake timed waits after roscpp returns from spin, then join before saving.
+    MO.stopBackgroundThreads();
     loopDetectionthread.join();
     visualizeMapThread.join();
+    MO.saveFinalTrajectory();
+    MO.saveMap();
 
     return 0;
 }

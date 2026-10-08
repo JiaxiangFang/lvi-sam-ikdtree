@@ -21,13 +21,19 @@ private:
     float twoKi;			// 2 * integral gain (Ki)
     float q0, q1, q2, q3;	// quaternion of sensor frame relative to auxiliary frame
     float integralFBx, integralFBy, integralFBz;
-    bool initialized;       // 首帧加速度初始化标志(消除大倾角启动瞬态)
+    bool initialized;
+    float expectedGravity;
+    float initDuration, initAx, initAy, initAz;
+    bool initializeIfStationary(float gx, float gy, float gz, float ax, float ay, float az, float dt);
+    bool gravityReliable(float ax, float ay, float az) const;
 public:
-	Mahony();
-    void initOrientationFromAccel(float ax, float ay, float az); // 用首帧重力方向直接置四元数
-	void MahonyAHRSupdate(float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz);
-    void MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float ay, float az);
-    float invSqrt(float x);
+    explicit Mahony(float gravity = 9.80511f);
+    void reset();
+    bool isInitialized() const { return initialized; }
+    void initOrientationFromAccel(float ax, float ay, float az);
+    void MahonyAHRSupdate(float gx, float gy, float gz, float ax, float ay, float az, float mx, float my, float mz, float dt);
+    void MahonyAHRSupdateIMU(float gx, float gy, float gz, float ax, float ay, float az, float dt);
+    static float invSqrt(float x);
     float getQuaternionX() {
 		return q1;
 	}

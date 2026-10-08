@@ -336,12 +336,29 @@ public:
 
     void imuHandler(const sensor_msgs::Imu::ConstPtr& imuMsg)
     {
-        sensor_msgs::Imu thisImu = imuConverter(*imuMsg);
+        sensor_msgs::Imu thisImu;
+        const bool valid = imuConverter(*imuMsg, thisImu);
+        if (imuStreamReset)
+        {
+            resetParams();
+            imuQueOpt.clear();
+            imuQueImu.clear();
+            lastImuT_opt = -1;
+        }
+        if (!valid)
+            return;
         // publish static tf
         tfMap2Odom.sendTransform(tf::StampedTransform(map_to_odom, thisImu.header.stamp, "map", "odom"));
 
         imuQueOpt.push_back(thisImu);
         imuQueImu.push_back(thisImu);
+        if (imuQueOpt.size() > imu_safety::kMaxQueueSize)
+        {
+            imuQueOpt.pop_front();
+            ROS_WARN_THROTTLE(5.0, "Preintegration IMU queue capped; check mapping odometry input");
+        }
+        if (imuQueImu.size() > imu_safety::kMaxQueueSize)
+            imuQueImu.pop_front();
 
         if (doneFirstOpt == false)
             return;
